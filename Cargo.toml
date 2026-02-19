@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/papeline-core",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+# Internal
+papeline-core = { path = "crates/papeline-core" }
+
+# Arrow ecosystem
+arrow = "54"
+parquet = { version = "54", features = ["arrow", "zstd"] }
+lance = { version = "0.24", default-features = false }
+
+# HTTP & async
+reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+
+# Compression
+flate2 = { version = "1", features = ["zlib-ng"], default-features = false }
+async-compression = { version = "0.4", features = ["tokio", "gzip"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+indicatif = { version = "0.17", features = ["rayon"] }
+comfy-table = "7"
+rayon = "1"
+memmap2 = "0.9"
+rustc-hash = "2"
+signal-hook = "0.3"
+glob = "0.3"
+
+# Dev
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.dev.package."*"]
+opt-level = 2

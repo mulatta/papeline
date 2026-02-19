@@ -18,6 +18,10 @@
           pkgs.sops
           pkgs.just
           pkgs.protobuf
+          # Profiling
+          pkgs.cargo-flamegraph
+          pkgs.perf
+          pkgs.samply
         ];
       };
     };

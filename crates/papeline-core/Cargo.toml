@@ -1,0 +1,25 @@
+[package]
+name = "papeline-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+arrow.workspace = true
+parquet.workspace = true
+lance.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+flate2.workspace = true
+async-compression.workspace = true
+memmap2.workspace = true
+rustc-hash.workspace = true
+log.workspace = true
+env_logger.workspace = true
+indicatif.workspace = true
+rayon.workspace = true
+glob.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
