@@ -3568,6 +3568,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "papeline-openalex"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "chrono",
+ "env_logger",
+ "indicatif",
+ "log",
+ "papeline-core",
+ "parquet",
+ "rayon",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "papeline-semantic-scholar"
 version = "0.1.0"
 dependencies = [
