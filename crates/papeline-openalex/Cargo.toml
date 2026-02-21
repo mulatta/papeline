@@ -17,6 +17,5 @@ env_logger.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 indicatif.workspace = true
-
 [dev-dependencies]
 tempfile.workspace = true

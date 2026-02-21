@@ -11,6 +11,7 @@ edition = "2021"
 papeline-core = { path = "crates/papeline-core" }
 papeline-openalex = { path = "crates/papeline-openalex" }
 papeline-semantic-scholar = { path = "crates/papeline-semantic-scholar" }
+papeline-cli = { path = "crates/papeline-cli" }
 
 # Arrow ecosystem
 arrow = "54"
@@ -44,6 +45,8 @@ memmap2 = "0.9"
 rustc-hash = "2"
 signal-hook = "0.3"
 glob = "0.3"
+toml = "0.8"
+directories = "5"
 
 # Dev
 tempfile = "3"

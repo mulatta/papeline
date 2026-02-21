@@ -1,0 +1,23 @@
+[package]
+name = "papeline-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "papeline"
+path = "src/main.rs"
+
+[dependencies]
+papeline-core.workspace = true
+papeline-openalex.workspace = true
+papeline-semantic-scholar.workspace = true
+
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+chrono.workspace = true
+serde.workspace = true
+toml.workspace = true
+directories.workspace = true
