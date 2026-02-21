@@ -1,8 +1,6 @@
 [workspace]
+members = ["crates/*"]
 resolver = "2"
-members = [
-    "crates/papeline-core",
-]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +9,7 @@ edition = "2021"
 [workspace.dependencies]
 # Internal
 papeline-core = { path = "crates/papeline-core" }
+papeline-semantic-scholar = { path = "crates/papeline-semantic-scholar" }
 
 # Arrow ecosystem
 arrow = "54"

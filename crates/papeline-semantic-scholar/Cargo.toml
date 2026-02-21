@@ -1,0 +1,24 @@
+[package]
+name = "papeline-semantic-scholar"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+papeline-core.workspace = true
+arrow.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+rayon.workspace = true
+log.workspace = true
+anyhow.workspace = true
+comfy-table.workspace = true
+clap.workspace = true
+glob.workspace = true
+indicatif.workspace = true
+signal-hook.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
