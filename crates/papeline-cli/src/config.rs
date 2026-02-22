@@ -11,6 +11,7 @@ use serde::Deserialize;
 pub struct Config {
     pub output: OutputConfig,
     pub openalex: OpenAlexConfig,
+    pub pubmed: PubMedConfig,
     pub s2: S2Config,
     pub workers: WorkersConfig,
 }
@@ -41,6 +42,20 @@ impl Default for OpenAlexConfig {
     fn default() -> Self {
         Self {
             base_url: "https://openalex.s3.amazonaws.com/".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PubMedConfig {
+    pub base_url: String,
+}
+
+impl Default for PubMedConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://ftp.ncbi.nlm.nih.gov/pubmed/baseline/".to_string(),
         }
     }
 }

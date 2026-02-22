@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 papeline-core.workspace = true
 papeline-openalex.workspace = true
+papeline-pubmed.workspace = true
 papeline-semantic-scholar.workspace = true
 
 clap.workspace = true

@@ -70,6 +70,9 @@ fn main() -> Result<()> {
             println!("OpenAlex:");
             println!("  Base URL: {}", config.openalex.base_url);
             println!();
+            println!("PubMed:");
+            println!("  Base URL: {}", config.pubmed.base_url);
+            println!();
             println!("Semantic Scholar:");
             println!("  API URL: {}", config.s2.api_url);
             println!(

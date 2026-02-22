@@ -19,6 +19,8 @@ pub struct FetchArgs {
 pub enum FetchSource {
     /// Fetch OpenAlex dataset
     Openalex(OpenAlexArgs),
+    /// Fetch PubMed baseline dataset
+    Pubmed(PubmedArgs),
     /// Fetch Semantic Scholar dataset
     S2(S2Args),
     /// Fetch all sources in parallel
@@ -75,6 +77,25 @@ impl From<OpenAlexEntity> for papeline_openalex::Entity {
             OpenAlexEntity::Funders => papeline_openalex::Entity::Funders,
         }
     }
+}
+
+#[derive(Args, Debug)]
+pub struct PubmedArgs {
+    /// Output directory
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Maximum number of files to process
+    #[arg(short = 'l', long)]
+    pub limit: Option<usize>,
+
+    /// Number of parallel workers
+    #[arg(short, long)]
+    pub workers: Option<usize>,
+
+    /// Zstd compression level (1-22)
+    #[arg(short, long)]
+    pub zstd_level: Option<i32>,
 }
 
 #[derive(Args, Debug)]
@@ -146,6 +167,7 @@ fn parse_date(s: &str) -> Result<NaiveDate, String> {
 pub fn run(args: FetchArgs, config: &Config) -> Result<()> {
     match args.source {
         FetchSource::Openalex(oa_args) => fetch_openalex(oa_args, config),
+        FetchSource::Pubmed(pm_args) => fetch_pubmed(pm_args, config),
         FetchSource::S2(s2_args) => fetch_s2(s2_args, config),
         FetchSource::All(all_args) => fetch_all(all_args, config),
     }
@@ -188,6 +210,43 @@ fn fetch_openalex(args: OpenAlexArgs, config: &Config) -> Result<()> {
 
     if summary.failed_shards > 0 {
         anyhow::bail!("Some shards failed");
+    }
+
+    Ok(())
+}
+
+fn fetch_pubmed(args: PubmedArgs, config: &Config) -> Result<()> {
+    let output_dir = args
+        .output
+        .unwrap_or_else(|| config.output.default_dir.join("pubmed"));
+    let workers = args.workers.unwrap_or(config.workers.default);
+    let zstd_level = args.zstd_level.unwrap_or(config.output.compression_level);
+
+    let pm_config = papeline_pubmed::Config {
+        output_dir: output_dir.clone(),
+        max_files: args.limit,
+        workers,
+        zstd_level,
+        ..Default::default()
+    };
+
+    log::info!("Fetching PubMed baseline");
+    log::info!("  Output: {}", output_dir.display());
+    log::info!("  Workers: {}", workers);
+
+    let summary = papeline_pubmed::run(&pm_config)?;
+
+    println!();
+    println!("=== PubMed Summary ===");
+    println!(
+        "Files: {}/{} completed ({} failed)",
+        summary.completed_files, summary.total_files, summary.failed_files
+    );
+    println!("Articles: {}", summary.total_articles);
+    println!("Time: {:.1}s", summary.elapsed.as_secs_f64());
+
+    if summary.failed_files > 0 {
+        anyhow::bail!("Some files failed");
     }
 
     Ok(())

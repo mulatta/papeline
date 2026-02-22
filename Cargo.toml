@@ -11,6 +11,7 @@ edition = "2021"
 papeline-core = { path = "crates/papeline-core" }
 papeline-openalex = { path = "crates/papeline-openalex" }
 papeline-semantic-scholar = { path = "crates/papeline-semantic-scholar" }
+papeline-pubmed = { path = "crates/papeline-pubmed" }
 papeline-cli = { path = "crates/papeline-cli" }
 
 # Arrow ecosystem
@@ -31,6 +32,7 @@ async-compression = { version = "0.4", features = ["tokio", "gzip"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+quick-xml = "0.37"
 
 # Utilities
 chrono = { version = "0.4", default-features = false, features = ["std"] }

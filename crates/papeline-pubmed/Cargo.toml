@@ -1,0 +1,21 @@
+[package]
+name = "papeline-pubmed"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+papeline-core.workspace = true
+arrow.workspace = true
+parquet.workspace = true
+quick-xml.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+rayon.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde_json.workspace = true
+indicatif.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
