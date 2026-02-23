@@ -63,10 +63,19 @@ pub fn process_file(
         return Err(e).with_context(|| format!("Failed after {max_retries} attempts"));
     }
 
-    // Parse articles
-    let articles = parse_pubmed_xml(&xml_content)
+    // Parse articles (and deleted PMIDs from updatefiles)
+    let parse_result = parse_pubmed_xml(&xml_content)
         .with_context(|| format!("Failed to parse {}", entry.filename))?;
 
+    if !parse_result.deleted_pmids.is_empty() {
+        log::info!(
+            "{}: {} deleted PMIDs (will be excluded at join stage)",
+            entry.filename,
+            parse_result.deleted_pmids.len()
+        );
+    }
+
+    let articles = parse_result.articles;
     let article_count = articles.len();
 
     if article_count == 0 {

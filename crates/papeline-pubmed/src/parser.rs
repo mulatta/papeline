@@ -112,21 +112,33 @@ pub struct DataBank {
     pub accession_numbers: Vec<String>,
 }
 
-/// Parse multiple PubMed articles from XML content
-pub fn parse_pubmed_xml(xml: &str) -> Result<Vec<PubmedArticle>> {
+/// Result of parsing a PubMed XML file.
+/// Contains both new/updated articles and deleted PMIDs.
+#[derive(Debug, Default)]
+pub struct ParseResult {
+    pub articles: Vec<PubmedArticle>,
+    pub deleted_pmids: Vec<String>,
+}
+
+/// Parse multiple PubMed articles from XML content.
+/// Also extracts DeleteCitation entries (PMIDs to be removed).
+pub fn parse_pubmed_xml(xml: &str) -> Result<ParseResult> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
-    let mut articles = Vec::new();
+    let mut result = ParseResult::default();
     let mut buf = Vec::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) if e.name().as_ref() == b"PubmedArticle" => {
                 match parse_article(&mut reader) {
-                    Ok(article) => articles.push(article),
+                    Ok(article) => result.articles.push(article),
                     Err(e) => log::debug!("Failed to parse article: {}", e),
                 }
+            }
+            Ok(Event::Start(e)) if e.name().as_ref() == b"DeleteCitation" => {
+                parse_delete_citation(&mut reader, &mut result.deleted_pmids)?;
             }
             Ok(Event::Eof) => break,
             Err(e) => return Err(e).context("XML parse error"),
@@ -135,7 +147,28 @@ pub fn parse_pubmed_xml(xml: &str) -> Result<Vec<PubmedArticle>> {
         buf.clear();
     }
 
-    Ok(articles)
+    Ok(result)
+}
+
+/// Parse `<DeleteCitation>` block: extract PMID values.
+fn parse_delete_citation(reader: &mut Reader<&[u8]>, deleted: &mut Vec<String>) -> Result<()> {
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf)? {
+            Event::Start(e) if e.name().as_ref() == b"PMID" => {
+                let text = reader.read_text(e.name())?;
+                let pmid = text.trim().to_string();
+                if !pmid.is_empty() {
+                    deleted.push(pmid);
+                }
+            }
+            Event::End(e) if e.name().as_ref() == b"DeleteCitation" => break,
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
 }
 
 fn parse_article(reader: &mut Reader<&[u8]>) -> Result<PubmedArticle> {
@@ -843,7 +876,7 @@ mod tests {
 
     #[test]
     fn parse_basic_article() {
-        let articles = parse_pubmed_xml(SAMPLE_XML).unwrap();
+        let articles = parse_pubmed_xml(SAMPLE_XML).unwrap().articles;
         assert_eq!(articles.len(), 1);
 
         let article = &articles[0];
@@ -858,7 +891,7 @@ mod tests {
 
     #[test]
     fn parse_mesh_terms() {
-        let articles = parse_pubmed_xml(SAMPLE_XML).unwrap();
+        let articles = parse_pubmed_xml(SAMPLE_XML).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.mesh_terms.len(), 1);
@@ -899,7 +932,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.authors.len(), 2);
@@ -940,7 +973,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(
@@ -974,7 +1007,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.chemicals.len(), 1);
@@ -1004,7 +1037,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.grants.len(), 1);
@@ -1029,7 +1062,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.keywords.len(), 2);
@@ -1054,7 +1087,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.publication_types.len(), 2);
@@ -1088,7 +1121,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.databanks.len(), 1);
@@ -1114,7 +1147,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.doi, Some("10.1000/test".to_string()));
@@ -1128,7 +1161,7 @@ mod tests {
 <PubmedArticleSet>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         assert!(articles.is_empty());
     }
 
@@ -1143,7 +1176,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         assert_eq!(articles.len(), 1);
         assert_eq!(articles[0].pmid, "11111");
         assert!(articles[0].title.is_none());
@@ -1180,7 +1213,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         assert_eq!(articles.len(), 3);
         assert_eq!(articles[0].pmid, "1");
         assert_eq!(articles[1].pmid, "2");
@@ -1286,7 +1319,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         assert_eq!(articles.len(), 1);
 
         let article = &articles[0];
@@ -1392,7 +1425,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         // Abstract parts should be joined
@@ -1423,7 +1456,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.mesh_terms.len(), 1);
@@ -1484,7 +1517,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         // Collective name should be captured
@@ -1523,7 +1556,7 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.databanks.len(), 2);
@@ -1555,10 +1588,57 @@ mod tests {
   </PubmedArticle>
 </PubmedArticleSet>"#;
 
-        let articles = parse_pubmed_xml(xml).unwrap();
+        let articles = parse_pubmed_xml(xml).unwrap().articles;
         let article = &articles[0];
 
         assert_eq!(article.pub_year, Some(2024));
         assert_eq!(article.pub_month, Some(12)); // Dec -> 12
+    }
+
+    #[test]
+    fn parse_delete_citation_block() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE PubmedArticleSet SYSTEM "http://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_190101.dtd">
+<PubmedArticleSet>
+  <DeleteCitation>
+    <PMID Version="1">12345</PMID>
+    <PMID Version="1">67890</PMID>
+    <PMID Version="1">11111</PMID>
+  </DeleteCitation>
+</PubmedArticleSet>"#;
+
+        let result = parse_pubmed_xml(xml).unwrap();
+        assert!(result.articles.is_empty());
+        assert_eq!(result.deleted_pmids, vec!["12345", "67890", "11111"]);
+    }
+
+    #[test]
+    fn parse_mixed_articles_and_deletions() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE PubmedArticleSet SYSTEM "http://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_190101.dtd">
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation Status="MEDLINE" Owner="NLM">
+      <PMID Version="1">99999</PMID>
+      <Article PubModel="Print">
+        <Journal>
+          <JournalIssue CitedMedium="Print">
+            <PubDate><Year>2024</Year></PubDate>
+          </JournalIssue>
+        </Journal>
+        <ArticleTitle>Test</ArticleTitle>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+  <DeleteCitation>
+    <PMID Version="1">12345</PMID>
+    <PMID Version="1">67890</PMID>
+  </DeleteCitation>
+</PubmedArticleSet>"#;
+
+        let result = parse_pubmed_xml(xml).unwrap();
+        assert_eq!(result.articles.len(), 1);
+        assert_eq!(result.articles[0].pmid, "99999");
+        assert_eq!(result.deleted_pmids, vec!["12345", "67890"]);
     }
 }
