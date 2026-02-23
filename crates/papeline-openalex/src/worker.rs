@@ -54,7 +54,7 @@ pub fn process_shard(
         content_length_hint: shard.content_length,
     };
     let stats = process_gzip_shard(&cfg, pb, WorkAccumulator::new, |line| {
-        serde_json::from_str::<WorkRow>(line).ok()
+        sonic_rs::from_str::<WorkRow>(line).ok()
     })?;
 
     Ok(ShardStats {

@@ -211,7 +211,7 @@ impl<'de> serde::Deserialize<'de> for EmbeddingVector {
             }
 
             fn visit_str<E: serde::de::Error>(self, s: &str) -> Result<Self::Value, E> {
-                serde_json::from_str::<Vec<f32>>(s)
+                sonic_rs::from_str::<Vec<f32>>(s)
                     .map(EmbeddingVector)
                     .map_err(serde::de::Error::custom)
             }

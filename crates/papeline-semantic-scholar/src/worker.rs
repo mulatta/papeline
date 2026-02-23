@@ -30,6 +30,22 @@ use crate::transform::{
     TldrRow,
 };
 
+/// Lightweight probe for early corpus ID filtering (avoids full deserialization)
+#[derive(serde::Deserialize)]
+struct CorpusIdProbe {
+    #[serde(default)]
+    corpusid: i64,
+}
+
+/// Lightweight probe for citation corpus ID pair filtering
+#[derive(serde::Deserialize)]
+struct CitationIdProbe {
+    #[serde(default)]
+    citingcorpusid: i64,
+    #[serde(default)]
+    citedcorpusid: i64,
+}
+
 /// Lance channel info passed to Phase 2 workers
 pub struct LanceWriterHandle {
     pub sender: SyncSender<RecordBatch>,
@@ -497,7 +513,7 @@ fn attempt_paper_shard(
             continue;
         }
 
-        let row: PaperRow = match serde_json::from_str(&buf) {
+        let row: PaperRow = match sonic_rs::from_str(&buf) {
             Ok(v) => v,
             Err(e) => {
                 if parse_errors < 5 {
@@ -598,10 +614,12 @@ fn attempt_filtered_shard(
                 &mut acc,
                 |b| sink.write_batch(b),
                 |line| {
-                    let row: AbstractRow = serde_json::from_str(line).ok()?;
-                    corpus_ids
-                        .contains(row.corpusid)
-                        .then_some((row.corpusid, row.text))
+                    let probe: CorpusIdProbe = sonic_rs::from_str(line).ok()?;
+                    if !corpus_ids.contains(probe.corpusid) {
+                        return None;
+                    }
+                    let row: AbstractRow = sonic_rs::from_str(line).ok()?;
+                    Some((row.corpusid, row.text))
                 },
                 pb,
             )
@@ -626,10 +644,12 @@ fn attempt_filtered_shard(
                 &mut acc,
                 |b| sink.write_batch(b),
                 |line| {
-                    let row: TldrRow = serde_json::from_str(line).ok()?;
-                    corpus_ids
-                        .contains(row.corpusid)
-                        .then_some((row.corpusid, row.text))
+                    let probe: CorpusIdProbe = sonic_rs::from_str(line).ok()?;
+                    if !corpus_ids.contains(probe.corpusid) {
+                        return None;
+                    }
+                    let row: TldrRow = sonic_rs::from_str(line).ok()?;
+                    Some((row.corpusid, row.text))
                 },
                 pb,
             )
@@ -654,10 +674,13 @@ fn attempt_filtered_shard(
                 &mut acc,
                 |b| sink.write_batch(b),
                 |line| {
-                    let row: CitationRow = serde_json::from_str(line).ok()?;
-                    (corpus_ids.contains(row.citingcorpusid)
-                        && corpus_ids.contains(row.citedcorpusid))
-                    .then_some(row)
+                    let probe: CitationIdProbe = sonic_rs::from_str(line).ok()?;
+                    if !corpus_ids.contains(probe.citingcorpusid)
+                        || !corpus_ids.contains(probe.citedcorpusid)
+                    {
+                        return None;
+                    }
+                    sonic_rs::from_str::<CitationRow>(line).ok()
                 },
                 pb,
             )
@@ -676,8 +699,11 @@ fn attempt_filtered_shard(
                 &mut acc,
                 |b| sink.write_batch(b),
                 |line| {
-                    let row: EmbeddingRow = serde_json::from_str(line).ok()?;
-                    corpus_ids.contains(row.corpusid).then_some(row)
+                    let probe: CorpusIdProbe = sonic_rs::from_str(line).ok()?;
+                    if !corpus_ids.contains(probe.corpusid) {
+                        return None;
+                    }
+                    sonic_rs::from_str::<EmbeddingRow>(line).ok()
                 },
                 pb,
             )
