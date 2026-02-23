@@ -9,7 +9,6 @@
           pkgs.rustc
           pkgs.rust-analyzer
           pkgs.clippy
-          pkgs.rustfmt
           # Build deps (zlib-ng, openssl for native-tls)
           pkgs.cmake
           pkgs.pkg-config
