@@ -442,6 +442,7 @@ mod tests {
     fn test_input() -> StageInput {
         let cfg = PubmedInput {
             base_url: "https://example.com".into(),
+            baseline_year: 26,
             max_files: Some(5),
             zstd_level: 3,
         };
@@ -517,6 +518,7 @@ mod tests {
     fn make_input(base_url: &str) -> StageInput {
         let cfg = PubmedInput {
             base_url: base_url.into(),
+            baseline_year: 26,
             max_files: Some(5),
             zstd_level: 3,
         };

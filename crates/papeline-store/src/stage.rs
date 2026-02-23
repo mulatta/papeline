@@ -62,6 +62,8 @@ impl StageInput {
 #[derive(Debug, Clone, Serialize)]
 pub struct PubmedInput {
     pub base_url: String,
+    /// Two-digit baseline year extracted from filenames (e.g. 26 for pubmed26n*.xml.gz)
+    pub baseline_year: u16,
     pub max_files: Option<usize>,
     pub zstd_level: i32,
 }
@@ -109,6 +111,7 @@ mod tests {
     fn input_hash_deterministic() {
         let input = PubmedInput {
             base_url: "https://example.com".into(),
+            baseline_year: 26,
             max_files: Some(10),
             zstd_level: 3,
         };
@@ -121,11 +124,13 @@ mod tests {
     fn input_hash_changes_with_config() {
         let input1 = PubmedInput {
             base_url: "https://a.com".into(),
+            baseline_year: 26,
             max_files: Some(10),
             zstd_level: 3,
         };
         let input2 = PubmedInput {
             base_url: "https://b.com".into(),
+            baseline_year: 26,
             max_files: Some(10),
             zstd_level: 3,
         };
@@ -198,6 +203,7 @@ mod tests {
         // Same config JSON string but different stage should still produce different StageInput
         let cfg = PubmedInput {
             base_url: "x".into(),
+            baseline_year: 26,
             max_files: None,
             zstd_level: 3,
         };
@@ -211,12 +217,33 @@ mod tests {
     fn pubmed_none_vs_some_limit() {
         let cfg1 = PubmedInput {
             base_url: "x".into(),
+            baseline_year: 26,
             max_files: None,
             zstd_level: 3,
         };
         let cfg2 = PubmedInput {
             base_url: "x".into(),
+            baseline_year: 26,
             max_files: Some(10),
+            zstd_level: 3,
+        };
+        let si1 = make_stage_input(StageName::Pubmed, &cfg1);
+        let si2 = make_stage_input(StageName::Pubmed, &cfg2);
+        assert_ne!(si1.input_hash(), si2.input_hash());
+    }
+
+    #[test]
+    fn pubmed_baseline_year_changes_hash() {
+        let cfg1 = PubmedInput {
+            base_url: "x".into(),
+            baseline_year: 25,
+            max_files: None,
+            zstd_level: 3,
+        };
+        let cfg2 = PubmedInput {
+            base_url: "x".into(),
+            baseline_year: 26,
+            max_files: None,
             zstd_level: 3,
         };
         let si1 = make_stage_input(StageName::Pubmed, &cfg1);

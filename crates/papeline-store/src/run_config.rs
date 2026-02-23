@@ -172,13 +172,15 @@ impl RunConfig {
     }
 
     /// Build StageInput for PubMed.
-    pub fn pubmed_input(&self, defaults: &Defaults) -> Option<StageInput> {
+    /// `baseline_year` must be pre-fetched from the PubMed manifest listing.
+    pub fn pubmed_input(&self, defaults: &Defaults, baseline_year: u16) -> Option<StageInput> {
         let cfg = self.pubmed.as_ref()?;
         let input = PubmedInput {
             base_url: cfg
                 .base_url
                 .clone()
                 .unwrap_or_else(|| defaults.pubmed_base_url.clone()),
+            baseline_year,
             max_files: cfg.limit,
             zstd_level: self.effective_zstd(cfg.zstd_level),
         };
@@ -530,7 +532,7 @@ memory_limit = "32GB"
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let defaults = Defaults::default();
-        let si = config.pubmed_input(&defaults).unwrap();
+        let si = config.pubmed_input(&defaults, 26).unwrap();
         assert!(si.config_json.contains(&defaults.pubmed_base_url));
         assert!(si.config_json.contains(r#""zstd_level":3"#));
     }
@@ -542,7 +544,7 @@ memory_limit = "32GB"
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let defaults = Defaults::default();
-        assert!(config.pubmed_input(&defaults).is_none());
+        assert!(config.pubmed_input(&defaults, 26).is_none());
     }
 
     #[test]
@@ -645,7 +647,7 @@ zstd_level = 10
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let defaults = Defaults::default();
-        let si = config.pubmed_input(&defaults).unwrap();
+        let si = config.pubmed_input(&defaults, 26).unwrap();
         // No stage-level override → uses global
         assert!(si.config_json.contains(r#""zstd_level":10"#));
     }
@@ -660,7 +662,7 @@ zstd_level = 10
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let defaults = Defaults::default();
-        let si = config.pubmed_input(&defaults).unwrap();
+        let si = config.pubmed_input(&defaults, 26).unwrap();
         // Stage-level override takes precedence
         assert!(si.config_json.contains(r#""zstd_level":10"#));
     }

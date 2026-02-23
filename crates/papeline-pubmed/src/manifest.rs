@@ -61,6 +61,25 @@ async fn fetch_manifest_async(base_url: &str) -> Result<Vec<ManifestEntry>> {
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("manifest fetch failed")))
 }
 
+/// Extract baseline year from manifest entries.
+///
+/// Parses filenames like `pubmed26n0001.xml.gz` → 26.
+/// Returns `None` if no entries or pattern unrecognized.
+pub fn extract_baseline_year(entries: &[ManifestEntry]) -> Option<u16> {
+    entries.first().and_then(|e| {
+        let name = e.filename.strip_prefix("pubmed")?;
+        let n_pos = name.find('n')?;
+        name[..n_pos].parse::<u16>().ok()
+    })
+}
+
+/// Fetch manifest and extract baseline year in one call.
+pub fn fetch_baseline_year(base_url: &str) -> Result<u16> {
+    let entries = fetch_manifest(base_url)?;
+    extract_baseline_year(&entries)
+        .with_context(|| "failed to extract baseline year from PubMed manifest filenames")
+}
+
 /// Parse HTML directory listing for .xml.gz files
 fn parse_html_listing(html: &str, base_url: &str) -> Result<Vec<ManifestEntry>> {
     let mut entries = Vec::new();
@@ -231,5 +250,23 @@ mod tests {
 
         assert_eq!(entries[0].size_bytes, Some(19 * 1024 * 1024));
         assert_eq!(entries[1].size_bytes, Some(17 * 1024 * 1024));
+    }
+
+    #[test]
+    fn extract_baseline_year_from_entries() {
+        let entries = parse_html_listing(SAMPLE_HTML, "https://example.com/").unwrap();
+        assert_eq!(extract_baseline_year(&entries), Some(26));
+    }
+
+    #[test]
+    fn extract_baseline_year_empty() {
+        assert_eq!(extract_baseline_year(&[]), None);
+    }
+
+    #[test]
+    fn extract_baseline_year_different_year() {
+        let html = r#"<a href="pubmed25n0001.xml.gz">pubmed25n0001.xml.gz</a>"#;
+        let entries = parse_html_listing(html, "https://example.com/").unwrap();
+        assert_eq!(extract_baseline_year(&entries), Some(25));
     }
 }

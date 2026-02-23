@@ -328,18 +328,35 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
         None
     };
 
-    // 3. Build stage inputs for fetch stages
+    // 3. Resolve PubMed baseline year (pre-fetch manifest listing)
+    let pm_baseline_year = if run_config.pubmed.is_some() {
+        let base_url = run_config
+            .pubmed
+            .as_ref()
+            .unwrap()
+            .base_url
+            .clone()
+            .unwrap_or_else(|| defaults.pubmed_base_url.clone());
+        log::info!("Fetching PubMed baseline year from {base_url}");
+        Some(papeline_pubmed::manifest::fetch_baseline_year(&base_url)?)
+    } else {
+        None
+    };
+
+    // 4. Build stage inputs for fetch stages
     let store = Store::new(&run_config.output)?;
     let mut fetch_plans: Vec<StagePlan> = Vec::new();
 
-    if let Some(input) = run_config.pubmed_input(&defaults) {
-        let (status, manifest) = check_cache(&store, &input, args.force);
-        fetch_plans.push(StagePlan {
-            name: StageName::Pubmed,
-            input,
-            status,
-            manifest,
-        });
+    if let Some(year) = pm_baseline_year {
+        if let Some(input) = run_config.pubmed_input(&defaults, year) {
+            let (status, manifest) = check_cache(&store, &input, args.force);
+            fetch_plans.push(StagePlan {
+                name: StageName::Pubmed,
+                input,
+                status,
+                manifest,
+            });
+        }
     }
 
     if let Some(input) = run_config.openalex_input() {
