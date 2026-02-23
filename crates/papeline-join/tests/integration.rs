@@ -819,3 +819,97 @@ fn test_s2_authors_aggregation() {
         "unmatched paper should have NULL s2_authors"
     );
 }
+
+/// PubMed PMID dedup: when the same PMID appears in multiple parquet files
+/// (baseline + updatefiles), keep only the row with the latest date_revised.
+#[test]
+fn test_pubmed_pmid_dedup() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let conn = Connection::open_in_memory().unwrap();
+
+    let pm_dir = data.join("pubmed");
+    let oa_dir = data.join("openalex");
+    let s2_dir = data.join("s2");
+    std::fs::create_dir_all(&pm_dir).unwrap();
+
+    // Baseline file: PMID 1 with old date_revised and old title
+    write_parquet(
+        &conn,
+        &pm_dir,
+        "pubmed_0001.parquet",
+        PM_COLS,
+        "(1, '10.1234/dup', NULL, NULL, 'Old Title', NULL, 'Old Abstract', \
+         'eng', 'ppublish', 'J1', 'J1', '1234-5678', '1', '1', '1-10', NULL, \
+         2024, 1, 1, NULL, '2024/01/01', NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
+         'Article'::VARCHAR, NULL, NULL, 0, NULL, NULL)",
+    );
+
+    // Updatefile: same PMID 1 with newer date_revised and updated title
+    write_parquet(
+        &conn,
+        &pm_dir,
+        "pubmed_1335.parquet",
+        PM_COLS,
+        "(1, '10.1234/dup', NULL, NULL, 'Updated Title', NULL, 'Updated Abstract', \
+         'eng', 'ppublish', 'J1', 'J1', '1234-5678', '1', '1', '1-10', NULL, \
+         2024, 6, 15, NULL, '2024/06/15', NULL, NULL, NULL, NULL, NULL, NULL, NULL, \
+         'Article'::VARCHAR, NULL, NULL, 0, NULL, NULL)",
+    );
+
+    // Minimal OA + S2 (empty-ish)
+    write_parquet(
+        &conn,
+        &oa_dir,
+        "works_0000.parquet",
+        OA_COLS,
+        &oa_row("W1", "10.1234/dup", "", 5),
+    );
+    write_parquet(
+        &conn,
+        &s2_dir,
+        "papers_0000.parquet",
+        S2_COLS,
+        &s2_row(100, "10.1234/dup", "", 10),
+    );
+    write_parquet(
+        &conn,
+        &s2_dir,
+        "citations_0000.parquet",
+        CIT_COLS,
+        &cit_row(9001, 100, 100),
+    );
+
+    let output = tmp.path().join("output");
+    let summary = papeline_join::run(&papeline_join::JoinConfig {
+        pubmed_dir: pm_dir,
+        openalex_dir: oa_dir,
+        s2_dir,
+        output_dir: output.clone(),
+        memory_limit: "256MB".to_string(),
+    })
+    .unwrap();
+
+    // Must be exactly 1 node (dedup), not 2
+    assert_eq!(summary.total_nodes, 1, "duplicate PMIDs must be deduped");
+
+    // Verify the kept row has the updated title (newer date_revised wins)
+    let verify = Connection::open_in_memory().unwrap();
+    let (title, abstract_text): (String, String) = verify
+        .query_row(
+            &format!(
+                "SELECT title, abstract_text FROM read_parquet('{}/nodes.parquet')",
+                output.display()
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(title, "Updated Title", "should keep the newer version");
+    assert_eq!(
+        abstract_text, "Updated Abstract",
+        "should keep the newer version"
+    );
+}

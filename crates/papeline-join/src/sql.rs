@@ -22,9 +22,15 @@ pub fn create_source_views(pubmed_dir: &Path, openalex_dir: &Path, s2_dir: &Path
     let s2 = s2_dir.display();
 
     let mut stmts = vec![
+        // Dedup PubMed by PMID: when updatefiles are included, the same PMID
+        // may appear in both baseline and updatefiles. Keep the most recently
+        // revised version (updatefiles have later date_revised).
         format!(
             "CREATE OR REPLACE VIEW v_pubmed AS \
-             SELECT * FROM read_parquet('{pm}/pubmed_*.parquet')"
+             SELECT * FROM read_parquet('{pm}/pubmed_*.parquet') \
+             QUALIFY ROW_NUMBER() OVER (\
+               PARTITION BY pmid ORDER BY date_revised DESC NULLS LAST\
+             ) = 1"
         ),
         format!(
             "CREATE OR REPLACE VIEW v_openalex AS \
