@@ -23,16 +23,42 @@ pub fn fetch_manifest(base_url: &str) -> Result<Vec<ManifestEntry>> {
 async fn fetch_manifest_async(base_url: &str) -> Result<Vec<ManifestEntry>> {
     let client = papeline_core::http_client();
 
-    let html = client
-        .get(base_url)
-        .send()
-        .await
-        .context("Failed to fetch manifest")?
-        .text()
-        .await
-        .context("Failed to read manifest")?;
+    let mut last_err = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_secs(2u64 << (attempt - 1));
+            log::info!(
+                "Retrying manifest fetch (attempt {}/3) after {delay:?}",
+                attempt + 1
+            );
+            tokio::time::sleep(delay).await;
+        }
 
-    parse_html_listing(&html, base_url)
+        match tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            client
+                .get(base_url)
+                .send()
+                .await
+                .context("Failed to fetch manifest")?
+                .text()
+                .await
+                .context("Failed to read manifest body")
+        })
+        .await
+        {
+            Ok(Ok(html)) => return parse_html_listing(&html, base_url),
+            Ok(Err(e)) => {
+                log::warn!("Manifest fetch failed: {e:#}");
+                last_err = Some(e);
+            }
+            Err(_) => {
+                log::warn!("Manifest fetch timed out (60s)");
+                last_err = Some(anyhow::anyhow!("manifest fetch timed out after 60s"));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("manifest fetch failed")))
 }
 
 /// Parse HTML directory listing for .xml.gz files

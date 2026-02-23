@@ -20,6 +20,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Connect timeout
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Response timeout (connect + headers, not including body download)
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Error types for stream operations
 #[derive(Debug)]
 pub enum StreamError {
@@ -119,14 +122,21 @@ pub type ByteCounter = Arc<AtomicU64>;
 pub fn open_gzip_reader(url: &str) -> Result<(GzipReader, ByteCounter, Option<u64>), StreamError> {
     let url = url.to_string();
 
-    // Make async request, get response
+    // Make async request, get response (with timeout for connect + headers)
     let (reader, total_bytes) = SHARED_RUNTIME.handle().block_on(async {
-        let response = SHARED_CLIENT
-            .get(&url)
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| StreamError::from_reqwest(&e))?;
+        let response = tokio::time::timeout(RESPONSE_TIMEOUT, async {
+            SHARED_CLIENT
+                .get(&url)
+                .send()
+                .await
+                .and_then(|r| r.error_for_status())
+                .map_err(|e| StreamError::from_reqwest(&e))
+        })
+        .await
+        .map_err(|_| StreamError::Http {
+            status: None,
+            message: format!("response timeout ({RESPONSE_TIMEOUT:?})"),
+        })??;
 
         let total_bytes = response
             .headers()

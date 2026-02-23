@@ -14,6 +14,12 @@ use crate::manifest::ManifestEntry;
 use crate::parser::parse_pubmed_xml;
 use crate::transform::ArticleAccumulator;
 
+/// Maximum retries for downloading a file
+const MAX_RETRIES: usize = 3;
+
+/// Read chunk size for progress updates (64KB decompressed)
+const READ_CHUNK: usize = 64 * 1024;
+
 /// Process a single PubMed XML file
 pub fn process_file(
     entry: &ManifestEntry,
@@ -24,22 +30,38 @@ pub fn process_file(
 ) -> Result<usize> {
     pb.set_message(entry.filename.clone());
 
-    // Open gzip stream
-    let (mut reader, byte_counter, total_bytes) =
-        open_gzip_reader(&entry.url).with_context(|| format!("Failed to open {}", entry.url))?;
+    let mut last_err = None;
+    let mut xml_content = String::new();
 
-    if let Some(total) = total_bytes {
-        upgrade_to_bar(&pb, total);
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            let delay = std::time::Duration::from_secs(2u64 << (attempt - 1));
+            log::info!(
+                "{}: retry {}/{MAX_RETRIES} after {delay:?}",
+                entry.filename,
+                attempt + 1
+            );
+            std::thread::sleep(delay);
+            pb.set_message(format!("{} (retry {})", entry.filename, attempt + 1));
+        }
+
+        match download_xml(entry, &pb) {
+            Ok(content) => {
+                xml_content = content;
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                log::warn!("{}: download failed: {e:#}", entry.filename);
+                last_err = Some(e);
+            }
+        }
     }
 
-    // Track progress via byte counter
-    let _byte_counter = byte_counter;
-
-    // Read entire XML content
-    let mut xml_content = String::new();
-    reader
-        .read_to_string(&mut xml_content)
-        .context("Failed to read XML content")?;
+    if let Some(e) = last_err {
+        pb.finish_and_clear();
+        return Err(e).with_context(|| format!("Failed after {MAX_RETRIES} attempts"));
+    }
 
     // Parse articles
     let articles = parse_pubmed_xml(&xml_content)
@@ -90,6 +112,33 @@ pub fn process_file(
     pb.finish_and_clear();
 
     Ok(article_count)
+}
+
+/// Download and decompress a PubMed XML file with progress tracking
+fn download_xml(entry: &ManifestEntry, pb: &ProgressBar) -> Result<String> {
+    let (mut reader, byte_counter, total_bytes) =
+        open_gzip_reader(&entry.url).with_context(|| format!("Failed to open {}", entry.url))?;
+
+    if let Some(total) = total_bytes {
+        upgrade_to_bar(pb, total);
+    }
+
+    let mut bytes = Vec::new();
+    let mut chunk = vec![0u8; READ_CHUNK];
+
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                bytes.extend_from_slice(&chunk[..n]);
+                pb.set_position(byte_counter.load(Ordering::Relaxed));
+            }
+            Err(e) => return Err(e).context("Failed to read XML content"),
+        }
+    }
+
+    pb.set_position(byte_counter.load(Ordering::Relaxed));
+    String::from_utf8(bytes).context("Invalid UTF-8 in XML content")
 }
 
 /// Statistics from processing
