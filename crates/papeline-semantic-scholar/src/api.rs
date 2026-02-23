@@ -43,7 +43,9 @@ pub fn api_get_with_retry(url: &str, api_key: &str) -> anyhow::Result<String> {
                     );
                     std::thread::sleep(delay);
                 } else {
-                    anyhow::bail!("API request failed: {e}");
+                    // Strip URL from error to avoid leaking API endpoints in logs
+                    let msg = papeline_core::stream::StreamError::from_reqwest(&e);
+                    anyhow::bail!("API request failed: {msg}");
                 }
             }
         }

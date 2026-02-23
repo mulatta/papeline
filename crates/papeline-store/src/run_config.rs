@@ -47,7 +47,6 @@ pub struct PubmedStageConfig {
     pub limit: Option<usize>,
     /// Include daily updatefiles in addition to baseline
     pub include_updates: Option<bool>,
-    pub zstd_level: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -55,7 +54,6 @@ pub struct OpenAlexStageConfig {
     pub entity: Option<String>,
     pub since: Option<String>,
     pub limit: Option<usize>,
-    pub zstd_level: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,7 +62,6 @@ pub struct S2StageConfig {
     pub release: Option<String>,
     pub datasets: Option<Vec<String>>,
     pub limit: Option<usize>,
-    pub zstd_level: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,11 +165,6 @@ impl RunConfig {
         Ok(())
     }
 
-    /// Get effective zstd level for a stage.
-    fn effective_zstd(&self, stage_level: Option<i32>) -> i32 {
-        stage_level.unwrap_or(self.zstd_level)
-    }
-
     /// Build StageInput for PubMed.
     /// `baseline_year` and `seq_end` must be pre-fetched from the PubMed manifest listing.
     pub fn pubmed_input(
@@ -190,7 +182,7 @@ impl RunConfig {
             baseline_year,
             seq_end,
             max_files: cfg.limit,
-            zstd_level: self.effective_zstd(cfg.zstd_level),
+            zstd_level: self.zstd_level,
         };
         Some(make_stage_input(StageName::Pubmed, &input))
     }
@@ -210,7 +202,7 @@ impl RunConfig {
             entity: cfg.entity.clone().unwrap_or_else(|| "works".into()),
             since: cfg.since.clone(),
             max_shards: cfg.limit,
-            zstd_level: self.effective_zstd(cfg.zstd_level),
+            zstd_level: self.zstd_level,
         };
         Some(make_stage_input(StageName::Openalex, &input))
     }
@@ -236,7 +228,7 @@ impl RunConfig {
             datasets,
             domains,
             max_shards: cfg.limit,
-            zstd_level: self.effective_zstd(cfg.zstd_level),
+            zstd_level: self.zstd_level,
         };
         Some(make_stage_input(StageName::S2, &input))
     }
@@ -434,11 +426,12 @@ output = "./data"
     #[test]
     fn openalex_input_with_overrides() {
         let toml = r#"
+zstd_level = 7
+
 [openalex]
 entity = "authors"
 since = "2024-06-01"
 limit = 10
-zstd_level = 7
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let si = config.openalex_input().unwrap();
@@ -669,17 +662,15 @@ zstd_level = 10
     }
 
     #[test]
-    fn effective_zstd_fallback() {
+    fn global_zstd_applies_to_all_stages() {
         let toml = r#"
-zstd_level = 5
+zstd_level = 10
 
 [pubmed]
-zstd_level = 10
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let defaults = Defaults::default();
         let si = config.pubmed_input(&defaults, 26, 1334).unwrap();
-        // Stage-level override takes precedence
         assert!(si.config_json.contains(r#""zstd_level":10"#));
     }
 }

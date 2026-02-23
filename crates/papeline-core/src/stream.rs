@@ -95,11 +95,29 @@ impl std::fmt::Display for StreamError {
 impl std::error::Error for StreamError {}
 
 impl StreamError {
-    /// Create HTTP error from reqwest error
+    /// Create HTTP error from reqwest error.
+    /// Strips URL from the message to avoid leaking signed URLs / tokens in logs.
     pub fn from_reqwest(e: &reqwest::Error) -> Self {
+        let raw = e.to_string();
+        // reqwest formats: "error ... for url (https://...): cause"
+        // Strip the URL portion to prevent leaking pre-signed tokens
+        let message = if let Some(start) = raw.find(" for url (") {
+            let before = &raw[..start];
+            let after = raw[start..]
+                .find("): ")
+                .map(|i| &raw[start + i + 3..])
+                .unwrap_or("");
+            if after.is_empty() {
+                before.to_string()
+            } else {
+                format!("{before}: {after}")
+            }
+        } else {
+            raw
+        };
         Self::Http {
             status: e.status().map(|s| s.as_u16()),
-            message: e.to_string(),
+            message,
         }
     }
 

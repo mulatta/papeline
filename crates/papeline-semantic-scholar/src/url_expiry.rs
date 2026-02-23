@@ -99,7 +99,8 @@ pub fn test_url_validity(url: &str) -> bool {
                 false
             } else {
                 // Network error - assume valid (don't refresh on network issues)
-                log::debug!("URL validity test network error: {e}");
+                // Don't log {e} directly — it may contain pre-signed URL with tokens
+                log::debug!("URL validity test network error (non-HTTP)");
                 true
             }
         }

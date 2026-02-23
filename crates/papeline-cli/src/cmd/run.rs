@@ -38,6 +38,10 @@ pub struct RunArgs {
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
+    /// Zstd compression level (1-22, default from run.toml or 3)
+    #[arg(long)]
+    pub zstd_level: Option<i32>,
+
     #[command(flatten)]
     pub pm: PubmedFlags,
 
@@ -66,18 +70,11 @@ pub struct PubmedFlags {
     /// Include daily updatefiles in addition to baseline
     #[arg(long)]
     pub pm_updates: bool,
-    /// Zstd compression level for PubMed
-    #[arg(long)]
-    pub pm_zstd: Option<i32>,
 }
 
 impl PubmedFlags {
     fn is_active(&self) -> bool {
-        self.pm
-            || self.pm_limit.is_some()
-            || self.pm_base_url.is_some()
-            || self.pm_updates
-            || self.pm_zstd.is_some()
+        self.pm || self.pm_limit.is_some() || self.pm_base_url.is_some() || self.pm_updates
     }
 }
 
@@ -96,18 +93,11 @@ pub struct OpenAlexFlags {
     /// Maximum shards
     #[arg(long)]
     pub oa_limit: Option<usize>,
-    /// Zstd compression level for OpenAlex
-    #[arg(long)]
-    pub oa_zstd: Option<i32>,
 }
 
 impl OpenAlexFlags {
     fn is_active(&self) -> bool {
-        self.oa
-            || self.oa_entity.is_some()
-            || self.oa_since.is_some()
-            || self.oa_limit.is_some()
-            || self.oa_zstd.is_some()
+        self.oa || self.oa_entity.is_some() || self.oa_since.is_some() || self.oa_limit.is_some()
     }
 }
 
@@ -129,9 +119,6 @@ pub struct S2Flags {
     /// Maximum shards
     #[arg(long)]
     pub s2_limit: Option<usize>,
-    /// Zstd compression level for S2
-    #[arg(long)]
-    pub s2_zstd: Option<i32>,
 }
 
 impl S2Flags {
@@ -141,7 +128,6 @@ impl S2Flags {
             || self.s2_release.is_some()
             || self.s2_datasets.is_some()
             || self.s2_limit.is_some()
-            || self.s2_zstd.is_some()
     }
 }
 
@@ -226,6 +212,9 @@ fn apply_cli_overrides(config: &mut RunConfig, args: &RunArgs) {
     if let Some(ref output) = args.output {
         config.output = output.clone();
     }
+    if let Some(v) = args.zstd_level {
+        config.zstd_level = v;
+    }
 
     // PubMed
     if args.pm.is_active() {
@@ -238,9 +227,6 @@ fn apply_cli_overrides(config: &mut RunConfig, args: &RunArgs) {
         }
         if args.pm.pm_updates {
             cfg.include_updates = Some(true);
-        }
-        if let Some(v) = args.pm.pm_zstd {
-            cfg.zstd_level = Some(v);
         }
     }
 
@@ -258,9 +244,6 @@ fn apply_cli_overrides(config: &mut RunConfig, args: &RunArgs) {
         if let Some(v) = args.oa.oa_limit {
             cfg.limit = Some(v);
         }
-        if let Some(v) = args.oa.oa_zstd {
-            cfg.zstd_level = Some(v);
-        }
     }
 
     // S2
@@ -270,7 +253,6 @@ fn apply_cli_overrides(config: &mut RunConfig, args: &RunArgs) {
             release: None,
             datasets: None,
             limit: None,
-            zstd_level: None,
         });
         if let Some(ref v) = args.s2.s2_domains {
             cfg.domains = v.clone();
@@ -283,9 +265,6 @@ fn apply_cli_overrides(config: &mut RunConfig, args: &RunArgs) {
         }
         if let Some(v) = args.s2.s2_limit {
             cfg.limit = Some(v);
-        }
-        if let Some(v) = args.s2.s2_zstd {
-            cfg.zstd_level = Some(v);
         }
     }
 
@@ -775,7 +754,7 @@ fn run_pubmed(
         output_dir: output_dir.to_path_buf(),
         max_files: cfg.limit,
         workers,
-        zstd_level: cfg.zstd_level.unwrap_or(run_config.zstd_level),
+        zstd_level: run_config.zstd_level,
         base_url: cfg
             .base_url
             .clone()
@@ -834,7 +813,7 @@ fn run_openalex(
         output_dir: output_dir.to_path_buf(),
         max_shards: cfg.limit,
         workers,
-        zstd_level: cfg.zstd_level.unwrap_or(run_config.zstd_level),
+        zstd_level: run_config.zstd_level,
     };
 
     let summary = papeline_openalex::run(&oa_config, progress.clone())?;
@@ -876,7 +855,7 @@ fn run_s2(
         output_dir: output_dir.to_path_buf(),
         workers,
         max_shards: cfg.limit,
-        zstd_level: cfg.zstd_level.unwrap_or(run_config.zstd_level),
+        zstd_level: run_config.zstd_level,
     };
 
     let s2_config = papeline_semantic_scholar::Config::try_from(s2_fetch_args)?;
