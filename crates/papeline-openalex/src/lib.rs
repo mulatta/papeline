@@ -15,7 +15,8 @@
 //!     ..Default::default()
 //! };
 //!
-//! let summary = run(&config).expect("Pipeline failed");
+//! let progress = std::sync::Arc::new(papeline_core::ProgressContext::new());
+//! let summary = run(&config, progress).expect("Pipeline failed");
 //! println!("Processed {} rows", summary.total_rows);
 //! ```
 

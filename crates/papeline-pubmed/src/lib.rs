@@ -19,7 +19,8 @@
 //!     ..Default::default()
 //! };
 //!
-//! let summary = run(&config)?;
+//! let progress = std::sync::Arc::new(papeline_core::ProgressContext::new());
+//! let summary = run(&config, progress)?;
 //! println!("Processed {} articles", summary.total_articles);
 //! ```
 

@@ -41,14 +41,14 @@ fn default_zstd_level() -> i32 {
     3
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct PubmedStageConfig {
     pub base_url: Option<String>,
     pub limit: Option<usize>,
     pub zstd_level: Option<i32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct OpenAlexStageConfig {
     pub entity: Option<String>,
     pub since: Option<String>,
@@ -71,6 +71,14 @@ pub struct JoinStageConfig {
     pub memory_limit: String,
 }
 
+impl Default for JoinStageConfig {
+    fn default() -> Self {
+        Self {
+            memory_limit: default_memory_limit(),
+        }
+    }
+}
+
 fn default_memory_limit() -> String {
     "8GB".into()
 }
@@ -78,23 +86,29 @@ fn default_memory_limit() -> String {
 /// Defaults from papeline.toml (the global config).
 pub struct Defaults {
     pub pubmed_base_url: String,
-    pub openalex_base_url: String,
-    pub s2_api_url: String,
-    pub zstd_level: i32,
 }
 
 impl Default for Defaults {
     fn default() -> Self {
         Self {
             pubmed_base_url: "https://ftp.ncbi.nlm.nih.gov/pubmed/baseline/".into(),
-            openalex_base_url: "https://openalex.s3.amazonaws.com/".into(),
-            s2_api_url: "https://api.semanticscholar.org/datasets/v1/".into(),
-            zstd_level: 3,
         }
     }
 }
 
 impl RunConfig {
+    /// Create an empty config with defaults and no stages enabled.
+    pub fn empty() -> Self {
+        Self {
+            output: default_output(),
+            zstd_level: default_zstd_level(),
+            pubmed: None,
+            openalex: None,
+            s2: None,
+            join: None,
+        }
+    }
+
     /// Parse run.toml from a file path.
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
@@ -172,7 +186,7 @@ impl RunConfig {
     }
 
     /// Build StageInput for OpenAlex.
-    pub fn openalex_input(&self, _defaults: &Defaults) -> Option<StageInput> {
+    pub fn openalex_input(&self) -> Option<StageInput> {
         let cfg = self.openalex.as_ref()?;
         let input = OpenAlexInput {
             entity: cfg.entity.clone().unwrap_or_else(|| "works".into()),
@@ -390,8 +404,7 @@ output = "./data"
 [openalex]
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
-        let defaults = Defaults::default();
-        let si = config.openalex_input(&defaults).unwrap();
+        let si = config.openalex_input().unwrap();
         // Default entity is "works"
         assert!(si.config_json.contains(r#""entity":"works""#));
         // Default zstd_level is 3
@@ -410,8 +423,7 @@ limit = 10
 zstd_level = 7
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
-        let defaults = Defaults::default();
-        let si = config.openalex_input(&defaults).unwrap();
+        let si = config.openalex_input().unwrap();
         assert!(si.config_json.contains(r#""entity":"authors""#));
         assert!(si.config_json.contains(r#""since":"2024-06-01""#));
         assert!(si.config_json.contains(r#""max_shards":10"#));

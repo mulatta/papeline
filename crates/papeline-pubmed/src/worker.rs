@@ -14,8 +14,7 @@ use crate::manifest::ManifestEntry;
 use crate::parser::parse_pubmed_xml;
 use crate::transform::ArticleAccumulator;
 
-/// Maximum retries for downloading a file
-const MAX_RETRIES: usize = 3;
+use papeline_core::stream::http_config;
 
 /// Read chunk size for progress updates (64KB decompressed)
 const READ_CHUNK: usize = 64 * 1024;
@@ -32,12 +31,13 @@ pub fn process_file(
 
     let mut last_err = None;
     let mut xml_content = String::new();
+    let max_retries = http_config().max_retries as usize;
 
-    for attempt in 0..MAX_RETRIES {
+    for attempt in 0..max_retries {
         if attempt > 0 {
             let delay = std::time::Duration::from_secs(2u64 << (attempt - 1));
             log::info!(
-                "{}: retry {}/{MAX_RETRIES} after {delay:?}",
+                "{}: retry {}/{max_retries} after {delay:?}",
                 entry.filename,
                 attempt + 1
             );
@@ -60,7 +60,7 @@ pub fn process_file(
 
     if let Some(e) = last_err {
         pb.finish_and_clear();
-        return Err(e).with_context(|| format!("Failed after {MAX_RETRIES} attempts"));
+        return Err(e).with_context(|| format!("Failed after {max_retries} attempts"));
     }
 
     // Parse articles
@@ -95,14 +95,14 @@ pub fn process_file(
 
         // Flush batch when full
         if acc.len() >= 10_000 {
-            let batch = acc.take_batch();
+            let batch = acc.take_batch()?;
             sink.write_batch(&batch)?;
         }
     }
 
     // Write remaining
     if !acc.is_empty() {
-        let batch = acc.take_batch();
+        let batch = acc.take_batch()?;
         sink.write_batch(&batch)?;
     }
 

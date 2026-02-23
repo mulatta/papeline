@@ -27,7 +27,8 @@ fn main() -> anyhow::Result<()> {
     log::info!("  Workers: {}", config.workers);
 
     // Run pipeline
-    let summary = papeline_openalex::run(&config)?;
+    let progress = std::sync::Arc::new(papeline_core::ProgressContext::new());
+    let summary = papeline_openalex::run(&config, progress)?;
 
     log::info!("Fetch complete!");
     log::info!("  Total rows: {}", summary.total_rows);

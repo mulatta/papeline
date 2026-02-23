@@ -14,6 +14,28 @@ pub struct Config {
     pub pubmed: PubMedConfig,
     pub s2: S2Config,
     pub workers: WorkersConfig,
+    pub http: HttpSettings,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct HttpSettings {
+    /// Read timeout in seconds (stall detection)
+    pub read_timeout: u64,
+    /// Maximum retry attempts for transient failures
+    pub max_retries: u32,
+    /// Milliseconds between parallel worker starts
+    pub stagger_ms: u64,
+}
+
+impl Default for HttpSettings {
+    fn default() -> Self {
+        Self {
+            read_timeout: 30,
+            max_retries: 3,
+            stagger_ms: 500,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

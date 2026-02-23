@@ -3810,6 +3810,7 @@ dependencies = [
  "comfy-table",
  "directories",
  "env_logger",
+ "indicatif",
  "log",
  "papeline-core",
  "papeline-join",
@@ -3852,6 +3853,7 @@ dependencies = [
  "anyhow",
  "duckdb",
  "env_logger",
+ "glob",
  "log",
  "tempfile",
 ]

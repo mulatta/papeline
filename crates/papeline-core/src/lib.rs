@@ -19,5 +19,6 @@ pub use progress::{ProgressContext, SharedProgress};
 pub use shutdown::{is_shutdown_requested, request_shutdown, shutdown_flag};
 pub use sink::{ErrorFlag, LanceSink, ParquetSink, cleanup_tmp_files, is_valid_parquet};
 pub use stream::{
-    ByteCounter, GzipReader, SHARED_RUNTIME, StreamError, http_client, open_gzip_reader,
+    ByteCounter, GzipReader, HttpConfig, SHARED_RUNTIME, StreamError, http_client, http_config,
+    open_gzip_reader, set_http_config, stagger,
 };

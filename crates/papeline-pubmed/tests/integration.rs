@@ -21,7 +21,11 @@ fn fetch_single_file() {
         ..Default::default()
     };
 
-    let summary = papeline_pubmed::run(&config).expect("Pipeline should succeed");
+    let summary = papeline_pubmed::run(
+        &config,
+        std::sync::Arc::new(papeline_core::ProgressContext::new()),
+    )
+    .expect("Pipeline should succeed");
 
     // Verify results
     assert_eq!(summary.total_files, 1);
@@ -68,7 +72,11 @@ fn fetch_multiple_files() {
         ..Default::default()
     };
 
-    let summary = papeline_pubmed::run(&config).expect("Pipeline should succeed");
+    let summary = papeline_pubmed::run(
+        &config,
+        std::sync::Arc::new(papeline_core::ProgressContext::new()),
+    )
+    .expect("Pipeline should succeed");
 
     // Verify results
     assert_eq!(summary.total_files, 3);
@@ -107,7 +115,11 @@ fn throughput() {
         ..Default::default()
     };
 
-    let summary = papeline_pubmed::run(&config).expect("Pipeline should succeed");
+    let summary = papeline_pubmed::run(
+        &config,
+        std::sync::Arc::new(papeline_core::ProgressContext::new()),
+    )
+    .expect("Pipeline should succeed");
 
     // Calculate throughput
     let articles_per_sec = summary.total_articles as f64 / summary.elapsed.as_secs_f64();
@@ -166,7 +178,11 @@ fn parquet_file_validity() {
         ..Default::default()
     };
 
-    papeline_pubmed::run(&config).expect("Pipeline should succeed");
+    papeline_pubmed::run(
+        &config,
+        std::sync::Arc::new(papeline_core::ProgressContext::new()),
+    )
+    .expect("Pipeline should succeed");
 
     // Find the parquet file
     let parquet_path = std::fs::read_dir(temp_dir.path())

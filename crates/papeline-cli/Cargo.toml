@@ -16,6 +16,7 @@ papeline-join.workspace = true
 papeline-store.workspace = true
 
 comfy-table.workspace = true
+indicatif.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

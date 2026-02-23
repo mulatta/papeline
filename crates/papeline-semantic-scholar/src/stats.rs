@@ -106,8 +106,8 @@ impl PaperSummary {
         stats
     }
 
-    /// Print summary table (TTY mode).
-    pub fn print(&self) {
+    /// Format summary table as a string.
+    pub fn format_table(&self) -> String {
         let mut table = Table::new();
         table
             .load_preset(UTF8_FULL)
@@ -168,7 +168,7 @@ impl PaperSummary {
             Cell::new(""),
         ]);
 
-        eprintln!("\n{table}");
+        format!("\n{table}")
     }
 
     /// Log minimal summary (non-TTY mode).
@@ -293,8 +293,8 @@ impl FilterSummary {
         }
     }
 
-    /// Print summary table (TTY mode).
-    pub fn print(&self) {
+    /// Format summary table as a string.
+    pub fn format_table(&self) -> String {
         let mut table = Table::new();
         table
             .load_preset(UTF8_FULL)
@@ -314,7 +314,7 @@ impl FilterSummary {
         self.add_dataset_row(&mut table, "citations", &self.citations);
         self.add_dataset_row(&mut table, "embeddings", &self.embeddings);
 
-        eprintln!("\n{table}");
+        format!("\n{table}")
     }
 
     fn add_dataset_row(&self, table: &mut Table, name: &str, ds: &DatasetStats) {
@@ -370,8 +370,8 @@ pub struct FinalSummary {
 }
 
 impl FinalSummary {
-    /// Print final summary table (TTY mode).
-    pub fn print(&self) {
+    /// Format final summary table as a string.
+    pub fn format_table(&self) -> String {
         let p = &self.paper;
         let f = &self.filter;
 
@@ -414,7 +414,7 @@ impl FinalSummary {
         self.add_filtered_row(&mut table, "citations", &f.citations);
         self.add_filtered_row(&mut table, "embeddings", &f.embeddings);
 
-        eprintln!("\n{table}");
+        let mut out = format!("\n{table}");
 
         // Data quality
         let total_failed = p.failed_shards
@@ -424,12 +424,14 @@ impl FinalSummary {
             + f.embeddings.failed_shards;
 
         if p.parse_errors > 0 || total_failed > 0 {
-            eprintln!(
-                "  Parse errors: {}  |  Failed shards: {}",
+            out.push_str(&format!(
+                "\n  Parse errors: {}  |  Failed shards: {}",
                 fmt_num(p.parse_errors),
                 total_failed
-            );
+            ));
         }
+
+        out
     }
 
     fn add_filtered_row(&self, table: &mut Table, name: &str, ds: &DatasetStats) {

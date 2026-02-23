@@ -13,8 +13,7 @@ use crate::schema;
 use crate::state::ShardInfo;
 use crate::transform::{Accumulator, WorkAccumulator, WorkRow};
 
-/// Maximum retry attempts for transient failures
-const MAX_RETRIES: u32 = 3;
+use papeline_core::stream::http_config;
 
 /// Initial capacity for per-line JSON read buffer
 const LINE_BUF_CAPACITY: usize = 8192;
@@ -53,18 +52,19 @@ pub fn process_shard(
     zstd_level: i32,
     pb: &ProgressBar,
 ) -> Result<ShardStats, ShardError> {
+    let max_retries = http_config().max_retries;
     let mut attempt = 0;
     loop {
         match attempt_shard(shard, output_dir, zstd_level, pb) {
             Ok(stats) => return Ok(stats),
-            Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
+            Err(e) if attempt < max_retries && e.is_retryable() => {
                 attempt += 1;
-                pb.set_message(format!("retry {attempt}/{MAX_RETRIES}..."));
+                pb.set_message(format!("retry {attempt}/{max_retries}..."));
                 log::debug!(
                     "shard_{:04}: attempt {}/{} failed: {e}, retrying...",
                     shard.shard_idx,
                     attempt,
-                    MAX_RETRIES
+                    max_retries
                 );
                 std::thread::sleep(backoff_duration(attempt));
             }
@@ -89,16 +89,9 @@ fn attempt_shard(
     let (mut reader, counter, total_bytes) =
         stream::open_gzip_reader(&shard.url).map_err(ShardError::Stream)?;
 
-    // Upgrade spinner to progress bar if we know total size
+    // Upgrade pending bar to bytes bar if we know total size
     if let Some(total) = total_bytes.or(shard.content_length) {
-        pb.set_length(total);
-        pb.set_style(
-            indicatif::ProgressStyle::with_template(
-                "{spinner:.green} {prefix} [{bar:30.cyan/blue}] {bytes}/{total_bytes} {msg}",
-            )
-            .unwrap()
-            .progress_chars("=>-"),
-        );
+        papeline_core::progress::upgrade_to_bar(pb, total);
     }
     pb.set_message("processing...");
 
@@ -153,16 +146,20 @@ fn attempt_shard(
 
         // Flush when batch is full
         if acc.is_full() {
-            sink.write_batch(&acc.take_batch())
-                .map_err(ShardError::Io)?;
+            let batch = acc
+                .take_batch()
+                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+            sink.write_batch(&batch).map_err(ShardError::Io)?;
         }
     }
 
     // Flush remaining rows
     pb.set_message("writing...");
     if !acc.is_empty() {
-        sink.write_batch(&acc.take_batch())
-            .map_err(ShardError::Io)?;
+        let batch = acc
+            .take_batch()
+            .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+        sink.write_batch(&batch).map_err(ShardError::Io)?;
     }
 
     let rows_written = sink.finalize().map_err(ShardError::Io)?;

@@ -2,6 +2,17 @@
 
 use indicatif::MultiProgress;
 
+/// ANSI color code and padded label for a log level.
+fn level_style(level: log::Level) -> (&'static str, &'static str) {
+    match level {
+        log::Level::Error => ("\x1b[31m", "ERROR"),
+        log::Level::Warn => ("\x1b[33m", "WARN "),
+        log::Level::Info => ("\x1b[32m", "INFO "),
+        log::Level::Debug => ("\x1b[36m", "DEBUG"),
+        log::Level::Trace => ("\x1b[35m", "TRACE"),
+    }
+}
+
 /// Logger that prints through indicatif MultiProgress to avoid mixing with progress bars.
 pub struct IndicatifLogger {
     inner: env_logger::Logger,
@@ -21,15 +32,8 @@ impl log::Log for IndicatifLogger {
 
     fn log(&self, record: &log::Record) {
         if self.inner.enabled(record.metadata()) {
-            let (color, level_str) = match record.level() {
-                log::Level::Error => ("\x1b[31m", "ERROR"),
-                log::Level::Warn => ("\x1b[33m", "WARN "),
-                log::Level::Info => ("\x1b[32m", "INFO "),
-                log::Level::Debug => ("\x1b[36m", "DEBUG"),
-                log::Level::Trace => ("\x1b[35m", "TRACE"),
-            };
-            let reset = "\x1b[0m";
-            let line = format!("[{color}{level_str}{reset}] {}", record.args());
+            let (color, label) = level_style(record.level());
+            let line = format!("[{color}{label}\x1b[0m] {}", record.args());
             self.multi.suspend(|| eprintln!("{line}"));
         }
     }
@@ -40,10 +44,10 @@ impl log::Log for IndicatifLogger {
 }
 
 /// Initialize logging with optional TTY mode (indicatif integration)
-pub fn init_logging(quiet: bool, verbose: bool, multi: Option<&MultiProgress>) {
+pub fn init_logging(quiet: bool, debug: bool, multi: Option<&MultiProgress>) {
     use std::io::Write;
 
-    let default_level = if verbose {
+    let default_level = if debug {
         "debug"
     } else if quiet {
         "warn"
@@ -65,14 +69,8 @@ pub fn init_logging(quiet: bool, verbose: bool, multi: Option<&MultiProgress>) {
     } else {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
             .format(|buf, record| {
-                let (color, level_str) = match record.level() {
-                    log::Level::Error => ("\x1b[31m", "ERROR"),
-                    log::Level::Warn => ("\x1b[33m", "WARN "),
-                    log::Level::Info => ("\x1b[32m", "INFO "),
-                    log::Level::Debug => ("\x1b[36m", "DEBUG"),
-                    log::Level::Trace => ("\x1b[35m", "TRACE"),
-                };
-                writeln!(buf, "[{color}{level_str}\x1b[0m] {}", record.args())
+                let (color, label) = level_style(record.level());
+                writeln!(buf, "[{color}{label}\x1b[0m] {}", record.args())
             })
             .init();
     }

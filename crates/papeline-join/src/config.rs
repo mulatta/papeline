@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 /// Configuration for the join pipeline.
 pub struct JoinConfig {
-    /// Directory containing PubMed parquet files (articles_*.parquet)
+    /// Directory containing PubMed parquet files (pubmed_*.parquet)
     pub pubmed_dir: PathBuf,
     /// Directory containing OpenAlex parquet files (works_*.parquet)
     pub openalex_dir: PathBuf,

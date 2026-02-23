@@ -184,7 +184,7 @@ impl ArticleAccumulator {
         self.pmid.is_empty()
     }
 
-    pub fn take_batch(&mut self) -> RecordBatch {
+    pub fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from(std::mem::take(&mut self.pmid))),
             Arc::new(StringArray::from(std::mem::take(&mut self.doi))),
@@ -228,7 +228,7 @@ impl ArticleAccumulator {
             Arc::new(StringArray::from(std::mem::take(&mut self.copyright_info))),
         ];
 
-        RecordBatch::try_new(Arc::new((*self.schema).clone()), arrays).expect("schema mismatch")
+        RecordBatch::try_new(Arc::new((*self.schema).clone()), arrays)
     }
 }
 
@@ -405,7 +405,7 @@ mod tests {
         acc.push(article);
         assert_eq!(acc.len(), 1);
 
-        let batch = acc.take_batch();
+        let batch = acc.take_batch().unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert!(acc.is_empty());
     }
@@ -578,7 +578,7 @@ mod tests {
         }
 
         assert_eq!(acc.len(), 5);
-        let batch = acc.take_batch();
+        let batch = acc.take_batch().unwrap();
         assert_eq!(batch.num_rows(), 5);
     }
 
@@ -611,7 +611,7 @@ mod tests {
         };
 
         acc.push(article);
-        let batch = acc.take_batch();
+        let batch = acc.take_batch().unwrap();
 
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(batch.num_columns(), 34); // Should match schema field count

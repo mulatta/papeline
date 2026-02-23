@@ -3,7 +3,7 @@
 use std::io::BufRead;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
@@ -37,7 +37,7 @@ impl std::fmt::Debug for LanceWriterHandle {
     }
 }
 
-const MAX_RETRIES: u32 = 3;
+use papeline_core::stream::http_config;
 
 /// Initial capacity for per-line JSON read buffer (typical S2 JSON line: 1–5KB)
 const LINE_BUF_CAPACITY: usize = 4096;
@@ -79,10 +79,12 @@ pub fn process_paper_shards(
     let shard_stats: Mutex<Vec<PaperShardStats>> = Mutex::new(Vec::new());
     let failed = Mutex::new(0usize);
     let is_tty = progress.is_tty();
+    let stagger_slot = AtomicUsize::new(0);
 
     rayon::scope(|s| {
         for _ in 0..config.workers {
             s.spawn(|_| {
+                papeline_core::stream::stagger(stagger_slot.fetch_add(1, Ordering::Relaxed));
                 while let Some(shard) = queue.next() {
                     if shutdown_flag().load(Ordering::Relaxed) {
                         break;
@@ -169,10 +171,12 @@ pub fn process_filtered_shards(
     let failed = Mutex::new(0usize);
     let shard_stats: Mutex<Vec<FilterShardStats>> = Mutex::new(Vec::new());
     let is_tty = progress.is_tty();
+    let stagger_slot2 = AtomicUsize::new(0);
 
     rayon::scope(|s| {
         for _ in 0..config.workers {
             s.spawn(|_| {
+                papeline_core::stream::stagger(stagger_slot2.fetch_add(1, Ordering::Relaxed));
                 while let Some(shard) = queue.next() {
                     if shutdown_flag().load(Ordering::Relaxed) {
                         break;
@@ -237,18 +241,19 @@ fn process_paper_shard(
     zstd_level: i32,
     pb: &ProgressBar,
 ) -> Result<(Vec<i64>, PaperShardStats), ()> {
+    let max_retries = http_config().max_retries;
     let mut attempt = 0;
     loop {
         match attempt_paper_shard(shard, output_dir, domains, zstd_level, pb) {
             Ok(result) => return Ok(result),
-            Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
+            Err(e) if attempt < max_retries && e.is_retryable() => {
                 attempt += 1;
-                pb.set_message(format!("retry {attempt}/{MAX_RETRIES}..."));
+                pb.set_message(format!("retry {attempt}/{max_retries}..."));
                 log::debug!(
                     "papers_{:04}: attempt {}/{} failed: {e}, retrying...",
                     shard.shard_idx,
                     attempt,
-                    MAX_RETRIES
+                    max_retries
                 );
                 std::thread::sleep(backoff_duration(attempt));
             }
@@ -388,38 +393,44 @@ fn attempt_paper_shard(
         papers_acc.push(row);
 
         if papers_acc.is_full() {
-            papers_sink
-                .write_batch(&papers_acc.take_batch())
-                .map_err(ShardError::Io)?;
+            let batch = papers_acc
+                .take_batch()
+                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+            papers_sink.write_batch(&batch).map_err(ShardError::Io)?;
         }
         if authors_acc.is_full() {
-            authors_sink
-                .write_batch(&authors_acc.take_batch())
-                .map_err(ShardError::Io)?;
+            let batch = authors_acc
+                .take_batch()
+                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+            authors_sink.write_batch(&batch).map_err(ShardError::Io)?;
         }
         if fields_acc.is_full() {
-            fields_sink
-                .write_batch(&fields_acc.take_batch())
-                .map_err(ShardError::Io)?;
+            let batch = fields_acc
+                .take_batch()
+                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+            fields_sink.write_batch(&batch).map_err(ShardError::Io)?;
         }
     }
 
     // Flush remaining rows
     pb.set_message("writing...");
     if !papers_acc.is_empty() {
-        papers_sink
-            .write_batch(&papers_acc.take_batch())
-            .map_err(ShardError::Io)?;
+        let batch = papers_acc
+            .take_batch()
+            .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+        papers_sink.write_batch(&batch).map_err(ShardError::Io)?;
     }
     if !authors_acc.is_empty() {
-        authors_sink
-            .write_batch(&authors_acc.take_batch())
-            .map_err(ShardError::Io)?;
+        let batch = authors_acc
+            .take_batch()
+            .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+        authors_sink.write_batch(&batch).map_err(ShardError::Io)?;
     }
     if !fields_acc.is_empty() {
-        fields_sink
-            .write_batch(&fields_acc.take_batch())
-            .map_err(ShardError::Io)?;
+        let batch = fields_acc
+            .take_batch()
+            .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+        fields_sink.write_batch(&batch).map_err(ShardError::Io)?;
     }
 
     papers_sink.finalize().map_err(ShardError::Io)?;
@@ -450,19 +461,20 @@ fn process_filtered_shard(
     zstd_level: i32,
     pb: &ProgressBar,
 ) -> Result<FilterShardStats, ()> {
+    let max_retries = http_config().max_retries;
     let mut attempt = 0;
     loop {
         match attempt_filtered_shard(shard, corpus_ids, output_dir, lance, zstd_level, pb) {
             Ok(stats) => return Ok(stats),
-            Err(e) if attempt < MAX_RETRIES && e.is_retryable() => {
+            Err(e) if attempt < max_retries && e.is_retryable() => {
                 attempt += 1;
-                pb.set_message(format!("retry {attempt}/{MAX_RETRIES}..."));
+                pb.set_message(format!("retry {attempt}/{max_retries}..."));
                 log::debug!(
                     "{}_{:04}: attempt {}/{} failed: {e}, retrying...",
                     shard.dataset,
                     shard.shard_idx,
                     attempt,
-                    MAX_RETRIES
+                    max_retries
                 );
                 std::thread::sleep(backoff_duration(attempt));
             }
@@ -670,12 +682,12 @@ fn process_shard_lines<A: Accumulator>(
             acc.push(row);
             rows_written += 1;
             if acc.is_full() {
-                write_batch(&acc.take_batch())?;
+                write_batch(&acc.take_batch().map_err(std::io::Error::other)?)?;
             }
         }
     }
     if acc.len() > 0 {
-        write_batch(&acc.take_batch())?;
+        write_batch(&acc.take_batch().map_err(std::io::Error::other)?)?;
     }
     Ok(LineProcessStats {
         rows_written,

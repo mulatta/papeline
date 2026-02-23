@@ -6,7 +6,7 @@
 use std::io::{self, BufReader, Read};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::task::Context;
 use std::time::Duration;
 
@@ -14,14 +14,55 @@ use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use tokio::io::{AsyncRead, ReadBuf};
 
-/// Read timeout for stall detection (10 seconds with no data = stall)
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Connect timeout
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Response timeout (connect + headers, not including body download)
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Configurable HTTP settings for timeouts, retries, and worker stagger.
+#[derive(Debug, Clone)]
+pub struct HttpConfig {
+    /// Read timeout for stall detection (no data within this duration = stall)
+    pub read_timeout: Duration,
+    /// Maximum retry attempts for transient failures
+    pub max_retries: u32,
+    /// Milliseconds between parallel worker starts (worker_id * stagger_ms)
+    pub stagger_ms: u64,
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            read_timeout: Duration::from_secs(30),
+            max_retries: 3,
+            stagger_ms: 500,
+        }
+    }
+}
+
+static HTTP_CONFIG: OnceLock<HttpConfig> = OnceLock::new();
+
+/// Set global HTTP configuration. Must be called before any HTTP operations.
+pub fn set_http_config(config: HttpConfig) {
+    HTTP_CONFIG.set(config).ok();
+}
+
+/// Get current HTTP configuration (returns default if not explicitly set).
+pub fn http_config() -> &'static HttpConfig {
+    HTTP_CONFIG.get_or_init(HttpConfig::default)
+}
+
+/// Sleep to stagger parallel worker starts.
+///
+/// Worker 0 does not sleep. Worker N sleeps N * stagger_ms milliseconds.
+/// This avoids thundering herd when many workers start downloading simultaneously.
+pub fn stagger(worker_id: usize) {
+    let ms = http_config().stagger_ms;
+    if ms > 0 && worker_id > 0 {
+        std::thread::sleep(Duration::from_millis(ms * worker_id as u64));
+    }
+}
 
 /// Error types for stream operations
 #[derive(Debug)]
@@ -195,6 +236,7 @@ impl TimeoutReader {
 
 impl Read for TimeoutReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read_timeout = http_config().read_timeout;
         SHARED_RUNTIME.handle().block_on(async {
             let read_future = async {
                 let mut read_buf = ReadBuf::new(buf);
@@ -205,11 +247,11 @@ impl Read for TimeoutReader {
                 Ok::<_, io::Error>(read_buf.filled().len())
             };
 
-            match tokio::time::timeout(READ_TIMEOUT, read_future).await {
+            match tokio::time::timeout(read_timeout, read_future).await {
                 Ok(result) => result,
                 Err(_) => Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "read timeout (10s with no data)",
+                    format!("read timeout ({}s with no data)", read_timeout.as_secs()),
                 )),
             }
         })

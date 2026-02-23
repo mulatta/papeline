@@ -5,28 +5,26 @@
 
 use std::io::IsTerminal;
 use std::sync::Arc;
+use std::time::Duration;
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
-/// Progress bar style with `bytes`/`total_bytes` and ETA
+/// Per-worker progress bar (uv-style: green bar, binary bytes)
 fn bar_style() -> ProgressStyle {
     ProgressStyle::default_bar()
-        .template(
-            "{spinner:.green} {prefix:>16.cyan.bold} {bar:12.cyan/blue} {bytes:.dim}/{total_bytes:.dim} eta {eta:.dim}  {wide_msg}",
-        )
+        .template("{prefix:<20.dim} {bar:30.green/dim} {binary_bytes:>7}/{binary_total_bytes:7} {wide_msg:.dim}")
         .expect("invalid template")
-        .progress_chars("▰▱")
+        .progress_chars("--")
 }
 
-/// Progress bar style as spinner (no total bytes known)
-fn spinner_style() -> ProgressStyle {
+/// Pending style — shown before total bytes are known
+fn pending_style() -> ProgressStyle {
     ProgressStyle::default_bar()
-        .template("{spinner:.green} {prefix:>16.cyan.bold} {bytes:.dim} {wide_msg}")
+        .template("{prefix:<20.dim} {wide_msg:.dim}")
         .expect("invalid template")
-        .progress_chars("▰▱")
 }
 
-/// Upgrade a progress bar to show `bytes`/`total_bytes` with bar.
+/// Upgrade a progress bar from pending to bytes bar.
 ///
 /// Call this after `open_gzip_reader` returns `total_bytes`.
 pub fn upgrade_to_bar(pb: &ProgressBar, total: u64) {
@@ -50,23 +48,54 @@ impl ProgressContext {
         }
     }
 
-    /// Create shard progress bar with download progress.
+    /// Create per-worker progress bar.
     ///
-    /// TTY: visible bar with bytes progress and ETA.
+    /// TTY: visible bar with pending style (no bytes yet).
     /// Non-TTY: hidden (no-op).
     ///
-    /// Starts as spinner. Call `upgrade_to_bar` after getting `total_bytes`
-    /// from `open_gzip_reader` to show the progress bar with ETA.
+    /// Call `upgrade_to_bar` after getting `total_bytes`
+    /// from `open_gzip_reader` to show bytes progress.
     pub fn shard_bar(&self, name: &str) -> ProgressBar {
         if !self.is_tty {
             return ProgressBar::hidden();
         }
 
-        let pb = self.multi.add(ProgressBar::new_spinner());
-        pb.set_style(spinner_style());
-        pb.set_prefix(name.to_string());
-        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+        let pb = self.multi.add(ProgressBar::new(0));
+        pb.set_style(pending_style());
+        // Truncate long names to keep bars aligned
+        let display = if name.len() > 20 { &name[..20] } else { name };
+        pb.set_prefix(display.to_string());
         pb
+    }
+
+    /// Create a stage status line managed by MultiProgress.
+    ///
+    /// Returns a ProgressBar with a spinner for active status display.
+    /// Update with `pb.set_message(...)` as the stage progresses.
+    /// Call `pb.finish()` to stop the spinner.
+    pub fn stage_line(&self, name: &str) -> ProgressBar {
+        if !self.is_tty {
+            return ProgressBar::hidden();
+        }
+        let pb = self.multi.add(ProgressBar::new(0));
+        pb.set_style(
+            ProgressStyle::with_template("{spinner:.green} {prefix:<10.cyan.bold} {wide_msg}")
+                .expect("invalid template"),
+        );
+        pb.set_prefix(name.to_string());
+        pb.enable_steady_tick(Duration::from_millis(80));
+        pb
+    }
+
+    /// Print a line above managed progress bars (avoids interference).
+    ///
+    /// Use this instead of `eprintln!` when progress bars are active.
+    pub fn println(&self, msg: impl AsRef<str>) {
+        if self.is_tty {
+            let _ = self.multi.println(msg);
+        } else {
+            eprintln!("{}", msg.as_ref());
+        }
     }
 
     /// Whether running in TTY mode.

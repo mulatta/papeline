@@ -1,11 +1,13 @@
 //! Fetch subcommand - download datasets from various sources
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::NaiveDate;
 use clap::{Args, Subcommand, ValueEnum};
+use comfy_table::{Cell, Color, Table, modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL};
+
+use papeline_core::SharedProgress;
 
 use crate::config::Config;
 
@@ -164,16 +166,32 @@ fn parse_date(s: &str) -> Result<NaiveDate, String> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| format!("Invalid date format: {e}"))
 }
 
-pub fn run(args: FetchArgs, config: &Config) -> Result<()> {
+pub fn run(args: FetchArgs, config: &Config, progress: &SharedProgress) -> Result<()> {
     match args.source {
-        FetchSource::Openalex(oa_args) => fetch_openalex(oa_args, config),
-        FetchSource::Pubmed(pm_args) => fetch_pubmed(pm_args, config),
-        FetchSource::S2(s2_args) => fetch_s2(s2_args, config),
-        FetchSource::All(all_args) => fetch_all(all_args, config),
+        FetchSource::Openalex(oa_args) => fetch_openalex(oa_args, config, progress),
+        FetchSource::Pubmed(pm_args) => fetch_pubmed(pm_args, config, progress),
+        FetchSource::S2(s2_args) => fetch_s2(s2_args, config, progress),
+        FetchSource::All(all_args) => fetch_all(all_args, config, progress),
     }
 }
 
-fn fetch_openalex(args: OpenAlexArgs, config: &Config) -> Result<()> {
+/// Print a key-value summary table on stderr
+fn print_summary(title: &str, rows: &[(&str, String)]) {
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .apply_modifier(UTF8_ROUND_CORNERS)
+        .set_header(vec![
+            Cell::new(title).fg(Color::Cyan),
+            Cell::new("Value").fg(Color::Cyan),
+        ]);
+    for (label, value) in rows {
+        table.add_row(vec![Cell::new(label), Cell::new(value)]);
+    }
+    eprintln!("\n{table}");
+}
+
+fn fetch_openalex(args: OpenAlexArgs, config: &Config, progress: &SharedProgress) -> Result<()> {
     let output_dir = args
         .output
         .unwrap_or_else(|| config.output.default_dir.clone());
@@ -194,19 +212,28 @@ fn fetch_openalex(args: OpenAlexArgs, config: &Config) -> Result<()> {
     log::info!("  Since: {:?}", args.since);
     log::info!("  Workers: {}", workers);
 
-    let summary = papeline_openalex::run(&oa_config)?;
+    let summary = papeline_openalex::run(&oa_config, progress.clone())?;
 
-    println!();
-    println!("=== OpenAlex Summary ===");
-    println!(
-        "Shards: {}/{} completed ({} failed)",
-        summary.completed_shards, summary.total_shards, summary.failed_shards
+    print_summary(
+        "OpenAlex",
+        &[
+            (
+                "Shards",
+                format!(
+                    "{}/{} ({} failed)",
+                    summary.completed_shards, summary.total_shards, summary.failed_shards
+                ),
+            ),
+            (
+                "Rows",
+                format!(
+                    "{} from {} lines ({} errors)",
+                    summary.total_rows, summary.total_lines, summary.parse_errors
+                ),
+            ),
+            ("Time", format!("{:.1}s", summary.elapsed.as_secs_f64())),
+        ],
     );
-    println!(
-        "Rows: {} from {} lines ({} parse errors)",
-        summary.total_rows, summary.total_lines, summary.parse_errors
-    );
-    println!("Time: {:.1}s", summary.elapsed.as_secs_f64());
 
     if summary.failed_shards > 0 {
         anyhow::bail!("Some shards failed");
@@ -215,7 +242,7 @@ fn fetch_openalex(args: OpenAlexArgs, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn fetch_pubmed(args: PubmedArgs, config: &Config) -> Result<()> {
+fn fetch_pubmed(args: PubmedArgs, config: &Config, progress: &SharedProgress) -> Result<()> {
     let output_dir = args
         .output
         .unwrap_or_else(|| config.output.default_dir.join("pubmed"));
@@ -234,16 +261,22 @@ fn fetch_pubmed(args: PubmedArgs, config: &Config) -> Result<()> {
     log::info!("  Output: {}", output_dir.display());
     log::info!("  Workers: {}", workers);
 
-    let summary = papeline_pubmed::run(&pm_config)?;
+    let summary = papeline_pubmed::run(&pm_config, progress.clone())?;
 
-    println!();
-    println!("=== PubMed Summary ===");
-    println!(
-        "Files: {}/{} completed ({} failed)",
-        summary.completed_files, summary.total_files, summary.failed_files
+    print_summary(
+        "PubMed",
+        &[
+            (
+                "Files",
+                format!(
+                    "{}/{} ({} failed)",
+                    summary.completed_files, summary.total_files, summary.failed_files
+                ),
+            ),
+            ("Articles", format!("{}", summary.total_articles)),
+            ("Time", format!("{:.1}s", summary.elapsed.as_secs_f64())),
+        ],
     );
-    println!("Articles: {}", summary.total_articles);
-    println!("Time: {:.1}s", summary.elapsed.as_secs_f64());
 
     if summary.failed_files > 0 {
         anyhow::bail!("Some files failed");
@@ -252,7 +285,7 @@ fn fetch_pubmed(args: PubmedArgs, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn fetch_s2(args: S2Args, config: &Config) -> Result<()> {
+fn fetch_s2(args: S2Args, config: &Config, progress: &SharedProgress) -> Result<()> {
     let output_dir = args
         .output
         .unwrap_or_else(|| config.output.default_dir.clone());
@@ -281,11 +314,8 @@ fn fetch_s2(args: S2Args, config: &Config) -> Result<()> {
     // Convert to Config (handles release resolution, URL fetching)
     let s2_config = papeline_semantic_scholar::Config::try_from(s2_fetch_args)?;
 
-    // Create progress context
-    let progress = Arc::new(papeline_core::ProgressContext::new());
-
-    // Run S2 pipeline
-    let exit_code = papeline_semantic_scholar::run(&s2_config, progress)?;
+    // Run S2 pipeline with shared progress
+    let exit_code = papeline_semantic_scholar::run(&s2_config, progress.clone())?;
 
     if exit_code != std::process::ExitCode::SUCCESS {
         anyhow::bail!("S2 pipeline failed");
@@ -294,7 +324,7 @@ fn fetch_s2(args: S2Args, config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn fetch_all(args: AllArgs, config: &Config) -> Result<()> {
+fn fetch_all(args: AllArgs, config: &Config, progress: &SharedProgress) -> Result<()> {
     let output_dir = args
         .output
         .clone()
@@ -309,9 +339,9 @@ fn fetch_all(args: AllArgs, config: &Config) -> Result<()> {
     log::info!("  Include S2: {}", include_s2);
 
     if args.parallel {
-        fetch_all_parallel(&args, config, output_dir, workers, zstd_level)
+        fetch_all_parallel(&args, config, output_dir, workers, zstd_level, progress)
     } else {
-        fetch_all_sequential(&args, config, output_dir, workers, zstd_level)
+        fetch_all_sequential(&args, config, output_dir, workers, zstd_level, progress)
     }
 }
 
@@ -321,6 +351,7 @@ fn fetch_all_sequential(
     output_dir: PathBuf,
     workers: usize,
     zstd_level: i32,
+    progress: &SharedProgress,
 ) -> Result<()> {
     // OpenAlex
     let oa_args = OpenAlexArgs {
@@ -331,7 +362,7 @@ fn fetch_all_sequential(
         workers: Some(workers),
         zstd_level: Some(zstd_level),
     };
-    fetch_openalex(oa_args, config)?;
+    fetch_openalex(oa_args, config, progress)?;
 
     // S2 (if domains provided)
     if let Some(domains) = args.domains.clone() {
@@ -349,13 +380,12 @@ fn fetch_all_sequential(
             workers: Some(workers),
             zstd_level: Some(zstd_level),
         };
-        fetch_s2(s2_args, config)?;
+        fetch_s2(s2_args, config, progress)?;
     } else {
         log::info!("S2 skipped (no --domains provided)");
     }
 
-    println!();
-    println!("=== All sources completed ===");
+    eprintln!("\nAll sources completed.");
     Ok(())
 }
 
@@ -365,6 +395,7 @@ fn fetch_all_parallel(
     output_dir: PathBuf,
     workers: usize,
     zstd_level: i32,
+    progress: &SharedProgress,
 ) -> Result<()> {
     use papeline_core::SHARED_RUNTIME;
 
@@ -372,6 +403,7 @@ fn fetch_all_parallel(
     let config_clone = config.clone();
     let oa_output = output_dir.join("openalex");
     let limit = args.limit;
+    let progress_clone = progress.clone();
 
     // Spawn OpenAlex task
     let oa_handle = SHARED_RUNTIME.handle().spawn_blocking(move || {
@@ -383,13 +415,14 @@ fn fetch_all_parallel(
             workers: Some(workers),
             zstd_level: Some(zstd_level),
         };
-        fetch_openalex(oa_args, &config_clone)
+        fetch_openalex(oa_args, &config_clone, &progress_clone)
     });
 
     // Spawn S2 task (if domains provided)
     let s2_handle = if let Some(domains) = args.domains.clone() {
         let config_clone = config.clone();
         let s2_output = output_dir.join("s2");
+        let progress_clone = progress.clone();
 
         Some(SHARED_RUNTIME.handle().spawn_blocking(move || {
             let s2_args = S2Args {
@@ -406,7 +439,7 @@ fn fetch_all_parallel(
                 workers: Some(workers),
                 zstd_level: Some(zstd_level),
             };
-            fetch_s2(s2_args, &config_clone)
+            fetch_s2(s2_args, &config_clone, &progress_clone)
         }))
     } else {
         log::info!("S2 skipped (no --domains provided)");
@@ -443,14 +476,12 @@ fn fetch_all_parallel(
         }
     }
 
-    println!();
     if errors.is_empty() {
-        println!("=== All sources completed successfully ===");
+        eprintln!("\nAll sources completed successfully.");
         Ok(())
     } else {
-        println!("=== Some sources failed ===");
         for e in &errors {
-            println!("  - {e}");
+            log::error!("{e}");
         }
         anyhow::bail!("{} source(s) failed", errors.len())
     }

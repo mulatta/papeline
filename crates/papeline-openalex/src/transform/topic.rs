@@ -182,7 +182,7 @@ impl Accumulator for TopicAccumulator {
         self.id.len()
     }
 
-    fn take_batch(&mut self) -> RecordBatch {
+    fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(StringArray::from(std::mem::take(&mut self.id))),
             Arc::new(StringArray::from(std::mem::take(&mut self.display_name))),
@@ -204,7 +204,7 @@ impl Accumulator for TopicAccumulator {
             Arc::new(StringArray::from(std::mem::take(&mut self.wikipedia_url))),
             Arc::new(StringArray::from(std::mem::take(&mut self.updated_date))),
         ];
-        RecordBatch::try_new(self.schema.clone(), arrays).expect("topics schema mismatch")
+        RecordBatch::try_new(self.schema.clone(), arrays)
     }
 }
 
@@ -301,7 +301,7 @@ mod tests {
         acc.push(row);
         assert_eq!(acc.len(), 1);
 
-        let batch = acc.take_batch();
+        let batch = acc.take_batch().unwrap();
         assert_eq!(batch.num_rows(), 1);
         assert_eq!(acc.len(), 0);
     }

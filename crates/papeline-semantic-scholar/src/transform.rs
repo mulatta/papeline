@@ -250,7 +250,7 @@ pub trait Accumulator {
         self.len() == 0
     }
     fn is_full(&self) -> bool;
-    fn take_batch(&mut self) -> RecordBatch;
+    fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError>;
 }
 
 // === Phase 1 accumulators (no trait — one row feeds 3 accumulators) ===
@@ -376,7 +376,7 @@ impl PapersAccumulator {
         self.corpusid.len() >= RECORD_BATCH_SIZE
     }
 
-    pub fn take_batch(&mut self) -> RecordBatch {
+    pub fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(std::mem::take(&mut self.corpusid))),
             Arc::new(StringArray::from(std::mem::take(&mut self.title))),
@@ -405,7 +405,7 @@ impl PapersAccumulator {
             Arc::new(StringArray::from(std::mem::take(&mut self.dblp))),
             Arc::new(StringArray::from(std::mem::take(&mut self.pubmedcentral))),
         ];
-        RecordBatch::try_new(self.schema.clone(), arrays).expect("papers schema mismatch")
+        RecordBatch::try_new(self.schema.clone(), arrays)
     }
 }
 
@@ -457,14 +457,14 @@ impl AuthorsAccumulator {
         self.corpusid.len() >= RECORD_BATCH_SIZE
     }
 
-    pub fn take_batch(&mut self) -> RecordBatch {
+    pub fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(std::mem::take(&mut self.corpusid))),
             Arc::new(StringArray::from(std::mem::take(&mut self.authorid))),
             Arc::new(StringArray::from(std::mem::take(&mut self.name))),
             Arc::new(Int32Array::from(std::mem::take(&mut self.position))),
         ];
-        RecordBatch::try_new(self.schema.clone(), arrays).expect("paper_authors schema mismatch")
+        RecordBatch::try_new(self.schema.clone(), arrays)
     }
 }
 
@@ -512,13 +512,13 @@ impl FieldsAccumulator {
         self.corpusid.len() >= RECORD_BATCH_SIZE
     }
 
-    pub fn take_batch(&mut self) -> RecordBatch {
+    pub fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(std::mem::take(&mut self.corpusid))),
             Arc::new(StringArray::from(std::mem::take(&mut self.category))),
             Arc::new(StringArray::from(std::mem::take(&mut self.source))),
         ];
-        RecordBatch::try_new(self.schema.clone(), arrays).expect("paper_fields schema mismatch")
+        RecordBatch::try_new(self.schema.clone(), arrays)
     }
 }
 
@@ -557,12 +557,12 @@ impl Accumulator for TextAccumulator {
         self.corpusid.len() >= RECORD_BATCH_SIZE
     }
 
-    fn take_batch(&mut self) -> RecordBatch {
+    fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(std::mem::take(&mut self.corpusid))),
             Arc::new(StringArray::from(std::mem::take(&mut self.text))),
         ];
-        RecordBatch::try_new(self.schema.clone(), arrays).expect("text schema mismatch")
+        RecordBatch::try_new(self.schema.clone(), arrays)
     }
 }
 
@@ -617,7 +617,7 @@ impl Accumulator for CitationsAccumulator {
         self.citationid.len() >= RECORD_BATCH_SIZE
     }
 
-    fn take_batch(&mut self) -> RecordBatch {
+    fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(std::mem::take(&mut self.citationid))),
             Arc::new(Int64Array::from(std::mem::take(&mut self.citingcorpusid))),
@@ -626,7 +626,7 @@ impl Accumulator for CitationsAccumulator {
             build_list_string_array(std::mem::take(&mut self.contexts)),
             build_list_list_string_array(std::mem::take(&mut self.intents)),
         ];
-        RecordBatch::try_new(self.schema.clone(), arrays).expect("citations schema mismatch")
+        RecordBatch::try_new(self.schema.clone(), arrays)
     }
 }
 
@@ -678,14 +678,14 @@ impl Accumulator for EmbeddingsAccumulator {
         self.corpusid.len() >= RECORD_BATCH_SIZE
     }
 
-    fn take_batch(&mut self) -> RecordBatch {
+    fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let vectors = std::mem::take(&mut self.vectors);
         let fsl = build_fixed_size_list_f32(vectors, schema::EMBEDDING_DIM);
         let arrays: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(std::mem::take(&mut self.corpusid))),
             fsl,
         ];
-        RecordBatch::try_new(self.schema.clone(), arrays).expect("embeddings schema mismatch")
+        RecordBatch::try_new(self.schema.clone(), arrays)
     }
 }
 

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use indicatif::MultiProgress;
+use papeline_core::SharedProgress;
 use rayon::prelude::*;
 
 use crate::config::Config;
@@ -22,7 +22,7 @@ pub struct Summary {
 }
 
 /// Run the PubMed pipeline
-pub fn run(config: &Config) -> Result<Summary> {
+pub fn run(config: &Config, progress: SharedProgress) -> Result<Summary> {
     let start = Instant::now();
 
     // Create output directory
@@ -47,8 +47,6 @@ pub fn run(config: &Config) -> Result<Summary> {
         config.workers
     );
 
-    // Setup progress
-    let multi = MultiProgress::new();
     let rows_counter = AtomicUsize::new(0);
     let completed_counter = AtomicUsize::new(0);
     let failed_counter = AtomicUsize::new(0);
@@ -62,14 +60,7 @@ pub fn run(config: &Config) -> Result<Summary> {
     // Process files in parallel
     pool.install(|| {
         entries.par_iter().for_each(|entry| {
-            let pb = multi.add(indicatif::ProgressBar::new_spinner());
-            pb.set_style(
-                indicatif::ProgressStyle::default_bar()
-                    .template("{spinner:.green} {prefix:>20.cyan} {bar:20} {bytes}/{total_bytes} {wide_msg}")
-                    .unwrap()
-                    .progress_chars("=>-"),
-            );
-            pb.set_prefix(entry.filename.clone());
+            let pb = progress.shard_bar(&entry.filename);
 
             match worker::process_file(entry, &config.output_dir, config, pb, &rows_counter) {
                 Ok(count) => {
@@ -96,22 +87,6 @@ pub fn run(config: &Config) -> Result<Summary> {
         total_articles,
         elapsed,
     };
-
-    // Log summary
-    log::info!("=== PubMed Pipeline Summary ===");
-    log::info!(
-        "Files: {}/{} completed ({} failed)",
-        summary.completed_files,
-        summary.total_files,
-        summary.failed_files
-    );
-    log::info!("Articles: {}", summary.total_articles);
-    log::info!("Time: {:.1}s", summary.elapsed.as_secs_f64());
-
-    if summary.total_articles > 0 {
-        let rate = summary.total_articles as f64 / summary.elapsed.as_secs_f64();
-        log::info!("Throughput: {:.0} articles/sec", rate);
-    }
 
     Ok(summary)
 }

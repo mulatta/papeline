@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use papeline_core::SharedProgress;
 
 use crate::config::Config;
 use crate::manifest::{ManifestEntry, fetch_manifest};
@@ -13,7 +13,7 @@ use crate::state::ShardInfo;
 use crate::worker::{ShardStats, process_shard};
 
 /// Run the OpenAlex data pipeline
-pub fn run(config: &Config) -> anyhow::Result<RunSummary> {
+pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<RunSummary> {
     let start = Instant::now();
 
     // Create output directory
@@ -62,25 +62,17 @@ pub fn run(config: &Config) -> anyhow::Result<RunSummary> {
         })
         .collect();
 
-    // Setup progress bars
-    let mp = MultiProgress::new();
-    let overall_pb = mp.add(ProgressBar::new(shards.len() as u64));
-    overall_pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} shards ({eta})",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
-
     // Process shards in parallel with atomic index for work distribution
     let next_idx = AtomicUsize::new(0);
     let stats: Mutex<Vec<ShardStats>> = Mutex::new(Vec::new());
     let failed: Mutex<usize> = Mutex::new(0);
 
+    let stagger_slot = AtomicUsize::new(0);
+
     rayon::scope(|s| {
         for _ in 0..config.workers {
             s.spawn(|_| {
+                papeline_core::stream::stagger(stagger_slot.fetch_add(1, Ordering::Relaxed));
                 loop {
                     // Atomically claim the next shard
                     let idx = next_idx.fetch_add(1, Ordering::SeqCst);
@@ -89,19 +81,16 @@ pub fn run(config: &Config) -> anyhow::Result<RunSummary> {
                     }
                     let shard = &shards[idx];
 
-                    let pb = mp.add(ProgressBar::new_spinner());
-                    pb.set_prefix(format!("shard_{:04}", shard.shard_idx));
+                    let pb = progress.shard_bar(&format!("shard_{:04}", shard.shard_idx));
                     pb.set_message("connecting...");
 
                     match process_shard(shard, &config.output_dir, config.zstd_level, &pb) {
                         Ok(s) => {
                             pb.finish_and_clear();
-                            overall_pb.inc(1);
                             stats.lock().unwrap().push(s);
                         }
                         Err(_) => {
                             pb.finish_and_clear();
-                            overall_pb.inc(1);
                             *failed.lock().unwrap() += 1;
                         }
                     }
@@ -109,8 +98,6 @@ pub fn run(config: &Config) -> anyhow::Result<RunSummary> {
             });
         }
     });
-
-    overall_pb.finish_with_message("done");
 
     // Collect results
     let stats = stats.into_inner().unwrap();
@@ -125,8 +112,6 @@ pub fn run(config: &Config) -> anyhow::Result<RunSummary> {
         parse_errors: stats.iter().map(|s| s.parse_errors).sum(),
         elapsed: start.elapsed(),
     };
-
-    summary.log();
 
     Ok(summary)
 }

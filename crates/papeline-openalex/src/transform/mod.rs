@@ -9,6 +9,7 @@ pub mod topic;
 pub mod work;
 
 use arrow::array::RecordBatch;
+use arrow::error::ArrowError;
 
 /// Batch size for creating `RecordBatch` from accumulated rows
 pub const RECORD_BATCH_SIZE: usize = 8192;
@@ -34,7 +35,7 @@ pub trait Accumulator {
     }
 
     /// Take buffered rows as a RecordBatch, resetting internal state
-    fn take_batch(&mut self) -> RecordBatch;
+    fn take_batch(&mut self) -> Result<RecordBatch, ArrowError>;
 }
 
 // Re-exports

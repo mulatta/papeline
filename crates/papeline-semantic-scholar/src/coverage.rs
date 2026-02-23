@@ -108,8 +108,8 @@ impl CoverageStats {
         })
     }
 
-    /// Print coverage table (TTY mode)
-    pub fn print(&self) {
+    /// Format coverage table as a string.
+    pub fn format_table(&self) -> String {
         let mut table = Table::new();
         table
             .load_preset(UTF8_FULL)
@@ -143,7 +143,7 @@ impl CoverageStats {
             self.add_coverage_row(&mut table, "embeddings", c);
         }
 
-        eprintln!("\n{table}");
+        format!("\n{table}")
     }
 
     fn add_coverage_row(&self, table: &mut Table, name: &str, c: &DatasetCoverage) {
@@ -334,8 +334,8 @@ impl FieldCompleteness {
         })
     }
 
-    /// Print field completeness table (TTY mode)
-    pub fn print(&self) {
+    /// Format field completeness table as a string.
+    pub fn format_table(&self) -> String {
         let mut table = Table::new();
         table
             .load_preset(UTF8_FULL)
@@ -367,7 +367,7 @@ impl FieldCompleteness {
             ]);
         }
 
-        eprintln!("\n{table}");
+        format!("\n{table}")
     }
 
     /// Log field completeness (non-TTY mode)
