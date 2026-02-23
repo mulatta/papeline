@@ -1,0 +1,17 @@
+[package]
+name = "papeline-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+chrono = { workspace = true, features = ["serde", "clock"] }
+toml.workspace = true
+log.workspace = true
+glob.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

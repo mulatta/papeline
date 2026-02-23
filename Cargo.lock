@@ -891,6 +891,7 @@ dependencies = [
  "cfg-if",
  "constant_time_eq",
  "cpufeatures",
+ "memmap2",
 ]
 
 [[package]]
@@ -3713,6 +3714,7 @@ dependencies = [
  "papeline-openalex",
  "papeline-pubmed",
  "papeline-semantic-scholar",
+ "papeline-store",
  "serde",
  "tokio",
  "toml",
@@ -3811,6 +3813,21 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "papeline-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "glob",
+ "log",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

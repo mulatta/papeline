@@ -34,6 +34,10 @@ enum Command {
     Fetch(cmd::fetch::FetchArgs),
     /// Join PubMed, OpenAlex, and S2 datasets
     Join(cmd::join::JoinArgs),
+    /// Run full pipeline from run.toml (fetch + join with caching)
+    Run(cmd::run::RunArgs),
+    /// Manage content-addressable store (cache)
+    Store(cmd::store::StoreArgs),
     /// Show pipeline status
     Status(cmd::status::StatusArgs),
     /// Show current configuration
@@ -57,6 +61,8 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Fetch(args) => cmd::fetch::run(args, &config),
         Command::Join(args) => cmd::join::run(args),
+        Command::Run(args) => cmd::run::run(args, &config),
+        Command::Store(args) => cmd::store::run(args),
         Command::Status(args) => cmd::status::run(args),
         Command::Config => {
             println!("Configuration:");

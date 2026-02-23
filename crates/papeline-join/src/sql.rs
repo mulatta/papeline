@@ -29,11 +29,11 @@ pub fn create_source_views(pubmed_dir: &Path, openalex_dir: &Path, s2_dir: &Path
         ),
         format!(
             "CREATE OR REPLACE VIEW v_s2_papers AS \
-             SELECT * FROM read_parquet('{s2}/papers_*.parquet')"
+             SELECT * FROM read_parquet('{s2}/**/papers_*.parquet')"
         ),
         format!(
             "CREATE OR REPLACE VIEW v_s2_citations AS \
-             SELECT * FROM read_parquet('{s2}/citations_*.parquet')"
+             SELECT * FROM read_parquet('{s2}/**/citations_*.parquet')"
         ),
     ]
 }
