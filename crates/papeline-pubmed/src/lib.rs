@@ -34,4 +34,4 @@ pub mod worker;
 
 // Re-exports
 pub use config::Config;
-pub use runner::{Summary, run};
+pub use runner::{Summary, run, run_with_entries};

@@ -45,6 +45,8 @@ fn default_zstd_level() -> i32 {
 pub struct PubmedStageConfig {
     pub base_url: Option<String>,
     pub limit: Option<usize>,
+    /// Include daily updatefiles in addition to baseline
+    pub include_updates: Option<bool>,
     pub zstd_level: Option<i32>,
 }
 
@@ -172,8 +174,13 @@ impl RunConfig {
     }
 
     /// Build StageInput for PubMed.
-    /// `baseline_year` must be pre-fetched from the PubMed manifest listing.
-    pub fn pubmed_input(&self, defaults: &Defaults, baseline_year: u16) -> Option<StageInput> {
+    /// `baseline_year` and `seq_end` must be pre-fetched from the PubMed manifest listing.
+    pub fn pubmed_input(
+        &self,
+        defaults: &Defaults,
+        baseline_year: u16,
+        seq_end: u32,
+    ) -> Option<StageInput> {
         let cfg = self.pubmed.as_ref()?;
         let input = PubmedInput {
             base_url: cfg
@@ -181,10 +188,19 @@ impl RunConfig {
                 .clone()
                 .unwrap_or_else(|| defaults.pubmed_base_url.clone()),
             baseline_year,
+            seq_end,
             max_files: cfg.limit,
             zstd_level: self.effective_zstd(cfg.zstd_level),
         };
         Some(make_stage_input(StageName::Pubmed, &input))
+    }
+
+    /// Whether PubMed updatefiles should be included.
+    pub fn pubmed_include_updates(&self) -> bool {
+        self.pubmed
+            .as_ref()
+            .and_then(|cfg| cfg.include_updates)
+            .unwrap_or(false)
     }
 
     /// Build StageInput for OpenAlex.
@@ -532,7 +548,7 @@ memory_limit = "32GB"
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let defaults = Defaults::default();
-        let si = config.pubmed_input(&defaults, 26).unwrap();
+        let si = config.pubmed_input(&defaults, 26, 1334).unwrap();
         assert!(si.config_json.contains(&defaults.pubmed_base_url));
         assert!(si.config_json.contains(r#""zstd_level":3"#));
     }
@@ -544,7 +560,7 @@ memory_limit = "32GB"
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let defaults = Defaults::default();
-        assert!(config.pubmed_input(&defaults, 26).is_none());
+        assert!(config.pubmed_input(&defaults, 26, 1334).is_none());
     }
 
     #[test]
@@ -647,7 +663,7 @@ zstd_level = 10
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let defaults = Defaults::default();
-        let si = config.pubmed_input(&defaults, 26).unwrap();
+        let si = config.pubmed_input(&defaults, 26, 1334).unwrap();
         // No stage-level override → uses global
         assert!(si.config_json.contains(r#""zstd_level":10"#));
     }
@@ -662,7 +678,7 @@ zstd_level = 10
 "#;
         let config: RunConfig = toml::from_str(toml).unwrap();
         let defaults = Defaults::default();
-        let si = config.pubmed_input(&defaults, 26).unwrap();
+        let si = config.pubmed_input(&defaults, 26, 1334).unwrap();
         // Stage-level override takes precedence
         assert!(si.config_json.contains(r#""zstd_level":10"#));
     }

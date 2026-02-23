@@ -63,6 +63,9 @@ pub struct PubmedFlags {
     /// PubMed FTP base URL
     #[arg(long)]
     pub pm_base_url: Option<String>,
+    /// Include daily updatefiles in addition to baseline
+    #[arg(long)]
+    pub pm_updates: bool,
     /// Zstd compression level for PubMed
     #[arg(long)]
     pub pm_zstd: Option<i32>,
@@ -70,7 +73,11 @@ pub struct PubmedFlags {
 
 impl PubmedFlags {
     fn is_active(&self) -> bool {
-        self.pm || self.pm_limit.is_some() || self.pm_base_url.is_some() || self.pm_zstd.is_some()
+        self.pm
+            || self.pm_limit.is_some()
+            || self.pm_base_url.is_some()
+            || self.pm_updates
+            || self.pm_zstd.is_some()
     }
 }
 
@@ -229,6 +236,9 @@ fn apply_cli_overrides(config: &mut RunConfig, args: &RunArgs) {
         if let Some(ref v) = args.pm.pm_base_url {
             cfg.base_url = Some(v.clone());
         }
+        if args.pm.pm_updates {
+            cfg.include_updates = Some(true);
+        }
         if let Some(v) = args.pm.pm_zstd {
             cfg.zstd_level = Some(v);
         }
@@ -328,8 +338,8 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
         None
     };
 
-    // 3. Resolve PubMed baseline year (pre-fetch manifest listing)
-    let pm_baseline_year = if run_config.pubmed.is_some() {
+    // 3. Resolve PubMed manifest (pre-fetch for baseline_year + seq_end)
+    let pm_manifest_data = if run_config.pubmed.is_some() {
         let base_url = run_config
             .pubmed
             .as_ref()
@@ -337,8 +347,18 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
             .base_url
             .clone()
             .unwrap_or_else(|| defaults.pubmed_base_url.clone());
-        log::info!("Fetching PubMed baseline year from {base_url}");
-        Some(papeline_pubmed::manifest::fetch_baseline_year(&base_url)?)
+        let include_updates = run_config.pubmed_include_updates();
+        log::info!(
+            "Fetching PubMed manifest from {base_url} (updates={})",
+            include_updates
+        );
+        let (entries, year, seq_end) =
+            papeline_pubmed::manifest::fetch_combined_manifest(&base_url, include_updates)?;
+        log::info!(
+            "PubMed baseline year={year}, seq_end={seq_end}, {} files",
+            entries.len()
+        );
+        Some((entries, year, seq_end))
     } else {
         None
     };
@@ -347,9 +367,15 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
     let store = Store::new(&run_config.output)?;
     let mut fetch_plans: Vec<StagePlan> = Vec::new();
 
-    if let Some(year) = pm_baseline_year {
-        if let Some(input) = run_config.pubmed_input(&defaults, year) {
+    // Pre-fetched PubMed entries to pass to runner (avoids double fetch)
+    let mut pm_entries: Option<Vec<papeline_pubmed::manifest::ManifestEntry>> = None;
+
+    if let Some((entries, year, seq_end)) = pm_manifest_data {
+        if let Some(input) = run_config.pubmed_input(&defaults, year, seq_end) {
             let (status, manifest) = check_cache(&store, &input, args.force);
+            if status != StageStatus::Cached {
+                pm_entries = Some(entries);
+            }
             fetch_plans.push(StagePlan {
                 name: StageName::Pubmed,
                 input,
@@ -463,6 +489,8 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
         let store_ref = &store;
         let rc_ref = &run_config;
         let s2_ref = &s2_release_id;
+        // Wrap in Mutex so we can take() from one thread inside the scope
+        let pm_entries = std::sync::Mutex::new(pm_entries);
 
         let results: Vec<Result<(usize, StageManifest)>> = std::thread::scope(|scope| {
             let handles: Vec<_> = run_indices
@@ -471,6 +499,7 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
                     let plan = &fetch_plans[i];
                     let pb = fetch_lines[i].clone();
                     let tmp_dir = store_ref.stage_tmp_dir(&plan.input);
+                    let pm_entries_ref = &pm_entries;
 
                     scope.spawn(move || -> Result<(usize, StageManifest)> {
                         if tmp_dir.exists() {
@@ -480,7 +509,8 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
 
                         match plan.name {
                             StageName::Pubmed => {
-                                run_pubmed(rc_ref, config, &tmp_dir, workers, progress)?;
+                                let entries = pm_entries_ref.lock().unwrap().take();
+                                run_pubmed(rc_ref, config, &tmp_dir, workers, entries, progress)?;
                             }
                             StageName::Openalex => {
                                 run_openalex(rc_ref, config, &tmp_dir, workers, progress)?;
@@ -737,6 +767,7 @@ fn run_pubmed(
     config: &Config,
     output_dir: &std::path::Path,
     workers: usize,
+    entries: Option<Vec<papeline_pubmed::manifest::ManifestEntry>>,
     progress: &SharedProgress,
 ) -> Result<()> {
     let cfg = run_config.pubmed.as_ref().unwrap();
@@ -751,7 +782,11 @@ fn run_pubmed(
             .unwrap_or_else(|| config.pubmed.base_url.clone()),
     };
 
-    let summary = papeline_pubmed::run(&pm_config, progress.clone())?;
+    let summary = if let Some(entries) = entries {
+        papeline_pubmed::run_with_entries(&pm_config, entries, progress.clone())?
+    } else {
+        papeline_pubmed::run(&pm_config, progress.clone())?
+    };
     log::info!(
         "pubmed: {}/{} files, {} articles",
         summary.completed_files,

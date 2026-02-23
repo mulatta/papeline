@@ -21,7 +21,27 @@ pub struct Summary {
     pub elapsed: std::time::Duration,
 }
 
-/// Run the PubMed pipeline
+/// Run the PubMed pipeline with pre-fetched manifest entries.
+/// Use this when entries are already available (e.g. from pre-fetch for cache key computation).
+pub fn run_with_entries(
+    config: &Config,
+    entries: Vec<ManifestEntry>,
+    progress: SharedProgress,
+) -> Result<Summary> {
+    let start = Instant::now();
+    std::fs::create_dir_all(&config.output_dir).context("Failed to create output directory")?;
+
+    // Apply limit
+    let entries: Vec<ManifestEntry> = if let Some(limit) = config.max_files {
+        entries.into_iter().take(limit).collect()
+    } else {
+        entries
+    };
+
+    run_entries(config, entries, progress, start)
+}
+
+/// Run the PubMed pipeline (fetches manifest internally).
 pub fn run(config: &Config, progress: SharedProgress) -> Result<Summary> {
     let start = Instant::now();
 
@@ -40,6 +60,15 @@ pub fn run(config: &Config, progress: SharedProgress) -> Result<Summary> {
         entries
     };
 
+    run_entries(config, entries, progress, start)
+}
+
+fn run_entries(
+    config: &Config,
+    entries: Vec<ManifestEntry>,
+    progress: SharedProgress,
+    start: Instant,
+) -> Result<Summary> {
     let total_files = entries.len();
     log::info!(
         "Processing {} files with {} workers",

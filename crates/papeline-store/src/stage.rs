@@ -64,6 +64,8 @@ pub struct PubmedInput {
     pub base_url: String,
     /// Two-digit baseline year extracted from filenames (e.g. 26 for pubmed26n*.xml.gz)
     pub baseline_year: u16,
+    /// Highest sequence number included (baseline + optional updatefiles)
+    pub seq_end: u32,
     pub max_files: Option<usize>,
     pub zstd_level: i32,
 }
@@ -112,6 +114,7 @@ mod tests {
         let input = PubmedInput {
             base_url: "https://example.com".into(),
             baseline_year: 26,
+            seq_end: 1334,
             max_files: Some(10),
             zstd_level: 3,
         };
@@ -125,12 +128,14 @@ mod tests {
         let input1 = PubmedInput {
             base_url: "https://a.com".into(),
             baseline_year: 26,
+            seq_end: 1334,
             max_files: Some(10),
             zstd_level: 3,
         };
         let input2 = PubmedInput {
             base_url: "https://b.com".into(),
             baseline_year: 26,
+            seq_end: 1334,
             max_files: Some(10),
             zstd_level: 3,
         };
@@ -204,6 +209,7 @@ mod tests {
         let cfg = PubmedInput {
             base_url: "x".into(),
             baseline_year: 26,
+            seq_end: 1334,
             max_files: None,
             zstd_level: 3,
         };
@@ -218,12 +224,14 @@ mod tests {
         let cfg1 = PubmedInput {
             base_url: "x".into(),
             baseline_year: 26,
+            seq_end: 1334,
             max_files: None,
             zstd_level: 3,
         };
         let cfg2 = PubmedInput {
             base_url: "x".into(),
             baseline_year: 26,
+            seq_end: 1334,
             max_files: Some(10),
             zstd_level: 3,
         };
@@ -237,12 +245,14 @@ mod tests {
         let cfg1 = PubmedInput {
             base_url: "x".into(),
             baseline_year: 25,
+            seq_end: 1334,
             max_files: None,
             zstd_level: 3,
         };
         let cfg2 = PubmedInput {
             base_url: "x".into(),
             baseline_year: 26,
+            seq_end: 1334,
             max_files: None,
             zstd_level: 3,
         };

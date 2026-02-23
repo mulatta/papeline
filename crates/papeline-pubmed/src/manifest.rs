@@ -66,11 +66,75 @@ async fn fetch_manifest_async(base_url: &str) -> Result<Vec<ManifestEntry>> {
 /// Parses filenames like `pubmed26n0001.xml.gz` → 26.
 /// Returns `None` if no entries or pattern unrecognized.
 pub fn extract_baseline_year(entries: &[ManifestEntry]) -> Option<u16> {
-    entries.first().and_then(|e| {
-        let name = e.filename.strip_prefix("pubmed")?;
-        let n_pos = name.find('n')?;
-        name[..n_pos].parse::<u16>().ok()
-    })
+    entries
+        .first()
+        .and_then(|e| parse_filename_parts(&e.filename).map(|(year, _)| year))
+}
+
+/// Extract sequence number from a PubMed filename.
+///
+/// `pubmed26n1359.xml.gz` → Some(1359)
+pub fn extract_seq(filename: &str) -> Option<u32> {
+    parse_filename_parts(filename).map(|(_, seq)| seq)
+}
+
+/// Parse `pubmedYYnSSSS.xml.gz` into (year, seq).
+fn parse_filename_parts(filename: &str) -> Option<(u16, u32)> {
+    let name = filename.strip_prefix("pubmed")?;
+    let n_pos = name.find('n')?;
+    let year: u16 = name[..n_pos].parse().ok()?;
+    let rest = &name[n_pos + 1..];
+    let dot_pos = rest.find('.')?;
+    let seq: u32 = rest[..dot_pos].parse().ok()?;
+    Some((year, seq))
+}
+
+/// Return the highest sequence number across entries, or 0 if empty.
+pub fn max_seq(entries: &[ManifestEntry]) -> u32 {
+    entries
+        .iter()
+        .filter_map(|e| extract_seq(&e.filename))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Derive the updatefiles URL from a baseline URL.
+///
+/// `https://ftp.ncbi.nlm.nih.gov/pubmed/baseline/` → `https://…/pubmed/updatefiles/`
+pub fn updatefiles_url(baseline_url: &str) -> String {
+    baseline_url.replace("/baseline", "/updatefiles")
+}
+
+/// Fetch baseline manifest, optionally including updatefiles.
+/// Returns (entries, baseline_year, max_seq).
+pub fn fetch_combined_manifest(
+    base_url: &str,
+    include_updates: bool,
+) -> Result<(Vec<ManifestEntry>, u16, u32)> {
+    let mut entries = fetch_manifest(base_url)?;
+    let year = extract_baseline_year(&entries)
+        .with_context(|| "failed to extract baseline year from PubMed manifest filenames")?;
+
+    if include_updates {
+        let update_url = updatefiles_url(base_url);
+        match fetch_manifest(&update_url) {
+            Ok(update_entries) => {
+                log::info!(
+                    "Found {} updatefiles at {}",
+                    update_entries.len(),
+                    update_url
+                );
+                entries.extend(update_entries);
+                entries.sort_by(|a, b| a.filename.cmp(&b.filename));
+            }
+            Err(e) => {
+                log::warn!("Failed to fetch updatefiles (continuing with baseline only): {e:#}");
+            }
+        }
+    }
+
+    let seq = max_seq(&entries);
+    Ok((entries, year, seq))
 }
 
 /// Fetch manifest and extract baseline year in one call.
@@ -268,5 +332,31 @@ mod tests {
         let html = r#"<a href="pubmed25n0001.xml.gz">pubmed25n0001.xml.gz</a>"#;
         let entries = parse_html_listing(html, "https://example.com/").unwrap();
         assert_eq!(extract_baseline_year(&entries), Some(25));
+    }
+
+    #[test]
+    fn extract_seq_from_filename() {
+        assert_eq!(extract_seq("pubmed26n1359.xml.gz"), Some(1359));
+        assert_eq!(extract_seq("pubmed26n0001.xml.gz"), Some(1));
+        assert_eq!(extract_seq("invalid.xml.gz"), None);
+    }
+
+    #[test]
+    fn max_seq_from_entries() {
+        let entries = parse_html_listing(SAMPLE_HTML, "https://example.com/").unwrap();
+        assert_eq!(max_seq(&entries), 2); // pubmed26n0001, pubmed26n0002
+    }
+
+    #[test]
+    fn max_seq_empty() {
+        assert_eq!(max_seq(&[]), 0);
+    }
+
+    #[test]
+    fn updatefiles_url_derivation() {
+        assert_eq!(
+            updatefiles_url("https://ftp.ncbi.nlm.nih.gov/pubmed/baseline/"),
+            "https://ftp.ncbi.nlm.nih.gov/pubmed/updatefiles/"
+        );
     }
 }

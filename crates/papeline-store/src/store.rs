@@ -443,6 +443,7 @@ mod tests {
         let cfg = PubmedInput {
             base_url: "https://example.com".into(),
             baseline_year: 26,
+            seq_end: 1334,
             max_files: Some(5),
             zstd_level: 3,
         };
@@ -519,6 +520,7 @@ mod tests {
         let cfg = PubmedInput {
             base_url: base_url.into(),
             baseline_year: 26,
+            seq_end: 1334,
             max_files: Some(5),
             zstd_level: 3,
         };
