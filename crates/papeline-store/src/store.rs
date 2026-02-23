@@ -110,10 +110,21 @@ impl Store {
         }
 
         match StageManifest::read_from(&dir) {
-            Ok(manifest) => LookupResult::Cached {
-                path: dir,
-                manifest,
-            },
+            Ok(manifest) => {
+                if manifest.format_version != crate::manifest::CURRENT_FORMAT_VERSION {
+                    log::warn!(
+                        "cache {short}: format_version {} != current {}, invalidating",
+                        manifest.format_version,
+                        crate::manifest::CURRENT_FORMAT_VERSION,
+                    );
+                    LookupResult::NeedsRun
+                } else {
+                    LookupResult::Cached {
+                        path: dir,
+                        manifest,
+                    }
+                }
+            }
             Err(e) => {
                 log::warn!("corrupt cache entry {short}: {e}");
                 LookupResult::NeedsRun
@@ -153,6 +164,7 @@ impl Store {
         };
 
         let manifest = StageManifest {
+            format_version: crate::manifest::CURRENT_FORMAT_VERSION,
             stage: input.stage,
             input_hash: input.short_hash(),
             config_json: input.config_json.clone(),

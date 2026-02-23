@@ -9,10 +9,21 @@ use serde::{Deserialize, Serialize};
 use crate::hash;
 use crate::stage::StageName;
 
+/// Current format version. Bump when output schema changes to auto-invalidate cache.
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
+
+fn default_format_version() -> u32 {
+    1
+}
+
 /// Manifest stored alongside stage output files.
 /// Records how the output was produced and its content hashes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageManifest {
+    /// Format version for cache invalidation. Old manifests without this field
+    /// deserialize as 1 (via serde default), causing a mismatch with CURRENT_FORMAT_VERSION.
+    #[serde(default = "default_format_version")]
+    pub format_version: u32,
     /// Which stage produced this output.
     pub stage: StageName,
     /// Blake3 hash of the content-affecting config (input hash).
@@ -255,6 +266,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let manifest = StageManifest {
+            format_version: CURRENT_FORMAT_VERSION,
             stage: crate::stage::StageName::Pubmed,
             input_hash: "abcd1234".into(),
             config_json: r#"{"base_url":"x"}"#.into(),
@@ -268,5 +280,23 @@ mod tests {
         assert_eq!(loaded.stage, manifest.stage);
         assert_eq!(loaded.input_hash, manifest.input_hash);
         assert_eq!(loaded.content_hash, manifest.content_hash);
+        assert_eq!(loaded.format_version, CURRENT_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn old_manifest_without_format_version_defaults_to_v1() {
+        let dir = tempfile::tempdir().unwrap();
+        // JSON without format_version field (simulates old manifest)
+        let json = r#"{
+            "stage": "pubmed",
+            "input_hash": "abcd1234",
+            "config_json": "{}",
+            "file_hashes": {},
+            "content_hash": "deadbeef",
+            "created_at": "2024-01-01T00:00:00Z"
+        }"#;
+        std::fs::write(dir.path().join("manifest.json"), json).unwrap();
+        let loaded = StageManifest::read_from(dir.path()).unwrap();
+        assert_eq!(loaded.format_version, 1);
     }
 }
