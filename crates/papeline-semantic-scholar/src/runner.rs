@@ -22,9 +22,8 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
     std::fs::create_dir_all(&config.output_dir).context("Cannot create output directory")?;
 
     log::info!(
-        "s2-dataset-fetcher starting: release={}, workers={}, domains={:?}, datasets={:?}",
+        "s2-dataset-fetcher starting: release={}, domains={:?}, datasets={:?}",
         config.release_id,
-        config.workers,
         config.domains,
         config.datasets
     );
@@ -42,11 +41,6 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
 
     cleanup_tmp_files(&config.output_dir).context("Failed to clean stale tmp files")?;
 
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(config.workers)
-        .build()
-        .context("Failed to create thread pool")?;
-
     let has_papers = config.datasets.contains(&Dataset::Papers);
     let filter_datasets: Vec<Dataset> = config
         .datasets
@@ -63,9 +57,8 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
     if has_papers {
         log::info!("Phase 1: processing papers");
         let paper_urls = load_urls(&config.url_dir, "papers", config.max_shards)?;
-        let (failed, summary) = pool.install(|| {
-            worker::process_paper_shards(&paper_urls, &config.output_dir, config, &progress)
-        });
+        let (failed, summary) =
+            worker::process_paper_shards(&paper_urls, &config.output_dir, config, &progress);
         if is_tty {
             progress.println(summary.format_table());
         } else {
@@ -94,13 +87,8 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
             log::info!("URLs refreshed before Phase 2");
         }
 
-        let (failed, summary) = run_filter_datasets(
-            config,
-            &config.output_dir,
-            &pool,
-            &filter_datasets,
-            &progress,
-        )?;
+        let (failed, summary) =
+            run_filter_datasets(config, &config.output_dir, &filter_datasets, &progress)?;
         if is_tty {
             progress.println(summary.format_table());
         } else {
@@ -159,7 +147,6 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
 fn run_filter_datasets(
     config: &Config,
     release_dir: &Path,
-    pool: &rayon::ThreadPool,
     filter_datasets: &[Dataset],
     progress: &SharedProgress,
 ) -> anyhow::Result<(usize, stats::FilterSummary)> {
@@ -203,17 +190,15 @@ fn run_filter_datasets(
         (None, None)
     };
 
-    let (mut failed, filter_summary) = pool.install(|| {
-        worker::process_filtered_shards(
-            all_shards,
-            &corpus_ids,
-            release_dir,
-            config,
-            lance_channel.as_ref(),
-            &shard_counts,
-            progress,
-        )
-    });
+    let (mut failed, filter_summary) = worker::process_filtered_shards(
+        all_shards,
+        &corpus_ids,
+        release_dir,
+        config,
+        lance_channel.as_ref(),
+        &shard_counts,
+        progress,
+    );
 
     // Drop sender → channel closes → LanceWriter flushes remaining
     drop(lance_channel);

@@ -15,7 +15,7 @@ fn fetch_single_file() {
 
     let config = papeline_pubmed::Config {
         output_dir: temp_dir.path().to_path_buf(),
-        workers: 2,
+
         max_files: Some(1),
         zstd_level: 3,
         ..Default::default()
@@ -66,7 +66,7 @@ fn fetch_multiple_files() {
 
     let config = papeline_pubmed::Config {
         output_dir: temp_dir.path().to_path_buf(),
-        workers: 4,
+
         max_files: Some(3),
         zstd_level: 3,
         ..Default::default()
@@ -109,7 +109,7 @@ fn throughput() {
 
     let config = papeline_pubmed::Config {
         output_dir: temp_dir.path().to_path_buf(),
-        workers: 4,
+
         max_files: Some(2),
         zstd_level: 3,
         ..Default::default()
@@ -172,7 +172,7 @@ fn parquet_file_validity() {
 
     let config = papeline_pubmed::Config {
         output_dir: temp_dir.path().to_path_buf(),
-        workers: 1,
+
         max_files: Some(1),
         zstd_level: 3,
         ..Default::default()

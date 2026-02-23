@@ -10,6 +10,8 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::task::Context;
 use std::time::Duration;
 
+use crate::semaphore::{Semaphore, SemaphoreGuard};
+
 use flate2::read::GzDecoder;
 use futures_util::StreamExt;
 use tokio::io::{AsyncRead, ReadBuf};
@@ -62,6 +64,28 @@ pub fn stagger(worker_id: usize) {
     if ms > 0 && worker_id > 0 {
         std::thread::sleep(Duration::from_millis(ms * worker_id as u64));
     }
+}
+
+// --- Download concurrency semaphore ---
+
+static DOWNLOAD_SEM: OnceLock<Semaphore> = OnceLock::new();
+
+/// Set global maximum concurrent downloads. Must be called before any downloads.
+pub fn set_download_concurrency(max: usize) {
+    DOWNLOAD_SEM.get_or_init(|| Semaphore::new(max));
+}
+
+fn default_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() * 2)
+        .unwrap_or(8)
+}
+
+/// Acquire a download permit. Blocks until a slot is available.
+pub fn acquire_download_permit() -> SemaphoreGuard<'static> {
+    DOWNLOAD_SEM
+        .get_or_init(|| Semaphore::new(default_concurrency()))
+        .acquire()
 }
 
 /// Error types for stream operations

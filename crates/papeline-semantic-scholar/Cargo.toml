@@ -16,7 +16,6 @@ rayon.workspace = true
 log.workspace = true
 anyhow.workspace = true
 comfy-table.workspace = true
-clap.workspace = true
 glob.workspace = true
 indicatif.workspace = true
 signal-hook.workspace = true

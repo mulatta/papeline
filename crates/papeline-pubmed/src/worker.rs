@@ -29,39 +29,45 @@ pub fn process_file(
 ) -> Result<usize> {
     pb.set_message(entry.filename.clone());
 
-    let mut last_err = None;
-    let mut xml_content = String::new();
-    let max_retries = http_config().max_retries as usize;
+    // Download with semaphore — permit released after download so other
+    // workers can start downloading while this one parses XML on CPU.
+    let xml_content = {
+        let mut last_err = None;
+        let mut content = String::new();
+        let max_retries = http_config().max_retries as usize;
 
-    for attempt in 0..max_retries {
-        if attempt > 0 {
-            let delay = std::time::Duration::from_secs(2u64 << (attempt - 1));
-            log::info!(
-                "{}: retry {}/{max_retries} after {delay:?}",
-                entry.filename,
-                attempt + 1
-            );
-            std::thread::sleep(delay);
-            pb.set_message(format!("{} (retry {})", entry.filename, attempt + 1));
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                let delay = std::time::Duration::from_secs(2u64 << (attempt - 1));
+                log::info!(
+                    "{}: retry {}/{max_retries} after {delay:?}",
+                    entry.filename,
+                    attempt + 1
+                );
+                std::thread::sleep(delay);
+                pb.set_message(format!("{} (retry {})", entry.filename, attempt + 1));
+            }
+
+            let _permit = papeline_core::acquire_download_permit();
+            match download_xml(entry, &pb) {
+                Ok(c) => {
+                    content = c;
+                    last_err = None;
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("{}: download failed: {e:#}", entry.filename);
+                    last_err = Some(e);
+                }
+            }
         }
 
-        match download_xml(entry, &pb) {
-            Ok(content) => {
-                xml_content = content;
-                last_err = None;
-                break;
-            }
-            Err(e) => {
-                log::warn!("{}: download failed: {e:#}", entry.filename);
-                last_err = Some(e);
-            }
+        if let Some(e) = last_err {
+            pb.finish_and_clear();
+            return Err(e).with_context(|| format!("Failed after {max_retries} attempts"));
         }
-    }
-
-    if let Some(e) = last_err {
-        pb.finish_and_clear();
-        return Err(e).with_context(|| format!("Failed after {max_retries} attempts"));
-    }
+        content
+    }; // permit released here → CPU-only parse below
 
     // Parse articles (and deleted PMIDs from updatefiles)
     let parse_result = parse_pubmed_xml(&xml_content)

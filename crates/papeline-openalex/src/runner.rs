@@ -2,10 +2,11 @@
 
 use std::fs;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use papeline_core::{SharedProgress, WorkQueue};
+use rayon::prelude::*;
+
+use papeline_core::SharedProgress;
 
 use crate::config::Config;
 use crate::manifest::{ManifestEntry, fetch_manifest};
@@ -44,11 +45,7 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<RunSumma
         return Ok(RunSummary::empty());
     }
 
-    log::info!(
-        "Processing {} shards with {} workers",
-        entries.len(),
-        config.workers
-    );
+    log::info!("Processing {} shards", entries.len());
 
     // Build shard info list
     let shards: Vec<ShardInfo> = entries
@@ -62,33 +59,24 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<RunSumma
         })
         .collect();
 
-    let queue = WorkQueue::new(shards);
-    let total_shards = queue.total();
+    let total_shards = shards.len();
     let stats: Mutex<Vec<ShardStats>> = Mutex::new(Vec::new());
     let failed: Mutex<usize> = Mutex::new(0);
 
-    let stagger_slot = AtomicUsize::new(0);
+    // Process shards in parallel using the global rayon pool
+    shards.par_iter().for_each(|shard| {
+        let pb = progress.shard_bar(&format!("shard_{:04}", shard.shard_idx));
+        pb.set_message("connecting...");
 
-    rayon::scope(|s| {
-        for _ in 0..config.workers {
-            s.spawn(|_| {
-                papeline_core::stream::stagger(stagger_slot.fetch_add(1, Ordering::Relaxed));
-                while let Some(shard) = queue.next() {
-                    let pb = progress.shard_bar(&format!("shard_{:04}", shard.shard_idx));
-                    pb.set_message("connecting...");
-
-                    match process_shard(shard, &config.output_dir, config.zstd_level, &pb) {
-                        Ok(s) => {
-                            pb.finish_and_clear();
-                            stats.lock().unwrap().push(s);
-                        }
-                        Err(_) => {
-                            pb.finish_and_clear();
-                            *failed.lock().unwrap() += 1;
-                        }
-                    }
-                }
-            });
+        match process_shard(shard, &config.output_dir, config.zstd_level, &pb) {
+            Ok(s) => {
+                pb.finish_and_clear();
+                stats.lock().unwrap().push(s);
+            }
+            Err(_) => {
+                pb.finish_and_clear();
+                *failed.lock().unwrap() += 1;
+            }
         }
     });
 

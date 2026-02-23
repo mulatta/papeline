@@ -195,7 +195,7 @@ fn fetch_openalex(args: OpenAlexArgs, config: &Config, progress: &SharedProgress
     let output_dir = args
         .output
         .unwrap_or_else(|| config.output.default_dir.clone());
-    let workers = args.workers.unwrap_or(config.workers.default);
+    let _workers = args.workers; // pool is global; kept for CLI compat
     let zstd_level = args.zstd_level.unwrap_or(config.output.compression_level);
 
     let oa_config = papeline_openalex::Config {
@@ -203,14 +203,12 @@ fn fetch_openalex(args: OpenAlexArgs, config: &Config, progress: &SharedProgress
         since: args.since,
         output_dir: output_dir.clone(),
         max_shards: args.limit,
-        workers,
         zstd_level,
     };
 
     log::info!("Fetching OpenAlex {}", oa_config.entity);
     log::info!("  Output: {}", output_dir.display());
     log::info!("  Since: {:?}", args.since);
-    log::info!("  Workers: {}", workers);
 
     let summary = papeline_openalex::run(&oa_config, progress.clone())?;
 
@@ -246,20 +244,18 @@ fn fetch_pubmed(args: PubmedArgs, config: &Config, progress: &SharedProgress) ->
     let output_dir = args
         .output
         .unwrap_or_else(|| config.output.default_dir.join("pubmed"));
-    let workers = args.workers.unwrap_or(config.workers.default);
+    let _workers = args.workers; // pool is global; kept for CLI compat
     let zstd_level = args.zstd_level.unwrap_or(config.output.compression_level);
 
     let pm_config = papeline_pubmed::Config {
         output_dir: output_dir.clone(),
         max_files: args.limit,
-        workers,
         zstd_level,
         ..Default::default()
     };
 
     log::info!("Fetching PubMed baseline");
     log::info!("  Output: {}", output_dir.display());
-    log::info!("  Workers: {}", workers);
 
     let summary = papeline_pubmed::run(&pm_config, progress.clone())?;
 
@@ -289,7 +285,7 @@ fn fetch_s2(args: S2Args, config: &Config, progress: &SharedProgress) -> Result<
     let output_dir = args
         .output
         .unwrap_or_else(|| config.output.default_dir.clone());
-    let workers = args.workers.unwrap_or(config.workers.default);
+    let _workers = args.workers; // pool is global; kept for CLI compat
     let zstd_level = args.zstd_level.unwrap_or(config.output.compression_level);
 
     log::info!("Fetching Semantic Scholar");
@@ -297,7 +293,6 @@ fn fetch_s2(args: S2Args, config: &Config, progress: &SharedProgress) -> Result<
     log::info!("  Domains: {:?}", args.domains);
     log::info!("  Datasets: {:?}", args.datasets);
     log::info!("  Output: {}", output_dir.display());
-    log::info!("  Workers: {}", workers);
 
     // Build FetchArgs for S2 (reuse existing Config conversion logic)
     let s2_fetch_args = papeline_semantic_scholar::FetchArgs {
@@ -306,7 +301,6 @@ fn fetch_s2(args: S2Args, config: &Config, progress: &SharedProgress) -> Result<
         domains: args.domains,
         datasets: args.datasets,
         output_dir,
-        workers,
         max_shards: args.limit,
         zstd_level,
     };
@@ -329,7 +323,7 @@ fn fetch_all(args: AllArgs, config: &Config, progress: &SharedProgress) -> Resul
         .output
         .clone()
         .unwrap_or_else(|| config.output.default_dir.clone());
-    let workers = args.workers.unwrap_or(config.workers.default);
+    let _workers = args.workers; // pool is global; kept for CLI compat
     let zstd_level = args.zstd_level.unwrap_or(config.output.compression_level);
     let include_s2 = args.domains.is_some();
 
@@ -339,9 +333,9 @@ fn fetch_all(args: AllArgs, config: &Config, progress: &SharedProgress) -> Resul
     log::info!("  Include S2: {}", include_s2);
 
     if args.parallel {
-        fetch_all_parallel(&args, config, output_dir, workers, zstd_level, progress)
+        fetch_all_parallel(&args, config, output_dir, zstd_level, progress)
     } else {
-        fetch_all_sequential(&args, config, output_dir, workers, zstd_level, progress)
+        fetch_all_sequential(&args, config, output_dir, zstd_level, progress)
     }
 }
 
@@ -349,7 +343,6 @@ fn fetch_all_sequential(
     args: &AllArgs,
     config: &Config,
     output_dir: PathBuf,
-    workers: usize,
     zstd_level: i32,
     progress: &SharedProgress,
 ) -> Result<()> {
@@ -359,7 +352,7 @@ fn fetch_all_sequential(
         since: None,
         output: Some(output_dir.join("openalex")),
         limit: args.limit,
-        workers: Some(workers),
+        workers: None,
         zstd_level: Some(zstd_level),
     };
     fetch_openalex(oa_args, config, progress)?;
@@ -377,7 +370,7 @@ fn fetch_all_sequential(
             ],
             output: Some(output_dir.join("s2")),
             limit: args.limit,
-            workers: Some(workers),
+            workers: None,
             zstd_level: Some(zstd_level),
         };
         fetch_s2(s2_args, config, progress)?;
@@ -393,7 +386,6 @@ fn fetch_all_parallel(
     args: &AllArgs,
     config: &Config,
     output_dir: PathBuf,
-    workers: usize,
     zstd_level: i32,
     progress: &SharedProgress,
 ) -> Result<()> {
@@ -412,7 +404,7 @@ fn fetch_all_parallel(
             since: None,
             output: Some(oa_output),
             limit,
-            workers: Some(workers),
+            workers: None,
             zstd_level: Some(zstd_level),
         };
         fetch_openalex(oa_args, &config_clone, &progress_clone)
@@ -436,7 +428,7 @@ fn fetch_all_parallel(
                 ],
                 output: Some(s2_output),
                 limit,
-                workers: Some(workers),
+                workers: None,
                 zstd_level: Some(zstd_level),
             };
             fetch_s2(s2_args, &config_clone, &progress_clone)

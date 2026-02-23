@@ -5,8 +5,19 @@ use std::path::PathBuf;
 use anyhow::Context;
 
 use crate::api::{fetch_all_dataset_urls, resolve_release};
-use crate::cli::FetchArgs;
 use crate::state::Dataset;
+
+/// CLI-facing arguments for the fetch command (plain struct, no clap derive).
+#[derive(Debug)]
+pub struct FetchArgs {
+    pub release: Option<String>,
+    pub url_dir: Option<PathBuf>,
+    pub domains: Vec<String>,
+    pub datasets: Vec<String>,
+    pub output_dir: PathBuf,
+    pub max_shards: Option<usize>,
+    pub zstd_level: i32,
+}
 
 /// Runtime configuration for s2-fetcher
 #[derive(Debug)]
@@ -16,7 +27,6 @@ pub struct Config {
     pub release_id: String,
     pub datasets: Vec<Dataset>,
     pub domains: Vec<String>,
-    pub workers: usize,
     pub max_shards: Option<usize>,
     pub zstd_level: i32,
 }
@@ -47,7 +57,7 @@ impl TryFrom<FetchArgs> for Config {
             fetch_all_dataset_urls(&release_id, &api_key, &datasets, &url_dir)?;
             (url_dir, release_id)
         } else {
-            unreachable!("clap ArgGroup ensures --release or --url-dir is provided");
+            anyhow::bail!("Either --release or --url-dir must be provided");
         };
 
         Ok(Self {
@@ -56,7 +66,6 @@ impl TryFrom<FetchArgs> for Config {
             release_id,
             datasets,
             domains: args.domains,
-            workers: args.workers,
             max_shards: args.max_shards,
             zstd_level: args.zstd_level,
         })

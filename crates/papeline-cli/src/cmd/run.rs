@@ -30,9 +30,13 @@ pub struct RunArgs {
     #[arg(long)]
     pub dry_run: bool,
 
-    /// Number of parallel workers
+    /// Number of rayon pool threads
     #[arg(short, long)]
     pub workers: Option<usize>,
+
+    /// Maximum concurrent downloads (default: workers * 2)
+    #[arg(long)]
+    pub max_downloads: Option<usize>,
 
     /// Output directory
     #[arg(short, long)]
@@ -300,6 +304,15 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
     };
 
     let workers = args.workers.unwrap_or(config.workers.default);
+    let max_downloads = args.max_downloads.unwrap_or(workers * 2);
+
+    // Initialize global rayon pool and download semaphore
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build_global()
+        .context("Failed to set global thread pool")?;
+    papeline_core::set_download_concurrency(max_downloads);
+    log::info!("Pool: {workers} threads, max downloads: {max_downloads}");
 
     // 2. Resolve S2 release if needed
     let s2_release_id = if run_config.s2.is_some() {
@@ -489,14 +502,14 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
                         match plan.name {
                             StageName::Pubmed => {
                                 let entries = pm_entries_ref.lock().unwrap().take();
-                                run_pubmed(rc_ref, config, &tmp_dir, workers, entries, progress)?;
+                                run_pubmed(rc_ref, config, &tmp_dir, entries, progress)?;
                             }
                             StageName::Openalex => {
-                                run_openalex(rc_ref, config, &tmp_dir, workers, progress)?;
+                                run_openalex(rc_ref, config, &tmp_dir, progress)?;
                             }
                             StageName::S2 => {
                                 let release_id = s2_ref.as_deref().unwrap();
-                                run_s2(rc_ref, config, &tmp_dir, workers, release_id, progress)?;
+                                run_s2(rc_ref, config, &tmp_dir, release_id, progress)?;
                             }
                             StageName::Join => unreachable!("join handled separately"),
                         }
@@ -745,7 +758,6 @@ fn run_pubmed(
     run_config: &RunConfig,
     config: &Config,
     output_dir: &std::path::Path,
-    workers: usize,
     entries: Option<Vec<papeline_pubmed::manifest::ManifestEntry>>,
     progress: &SharedProgress,
 ) -> Result<()> {
@@ -753,7 +765,6 @@ fn run_pubmed(
     let pm_config = papeline_pubmed::Config {
         output_dir: output_dir.to_path_buf(),
         max_files: cfg.limit,
-        workers,
         zstd_level: run_config.zstd_level,
         base_url: cfg
             .base_url
@@ -782,7 +793,6 @@ fn run_openalex(
     run_config: &RunConfig,
     _config: &Config,
     output_dir: &std::path::Path,
-    workers: usize,
     progress: &SharedProgress,
 ) -> Result<()> {
     let cfg = run_config.openalex.as_ref().unwrap();
@@ -812,7 +822,6 @@ fn run_openalex(
         since,
         output_dir: output_dir.to_path_buf(),
         max_shards: cfg.limit,
-        workers,
         zstd_level: run_config.zstd_level,
     };
 
@@ -833,7 +842,6 @@ fn run_s2(
     run_config: &RunConfig,
     _config: &Config,
     output_dir: &std::path::Path,
-    workers: usize,
     release_id: &str,
     progress: &SharedProgress,
 ) -> Result<()> {
@@ -853,7 +861,6 @@ fn run_s2(
         domains: cfg.domains.clone(),
         datasets,
         output_dir: output_dir.to_path_buf(),
-        workers,
         max_shards: cfg.limit,
         zstd_level: run_config.zstd_level,
     };

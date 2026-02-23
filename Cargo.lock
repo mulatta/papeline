@@ -3882,6 +3882,7 @@ dependencies = [
  "papeline-pubmed",
  "papeline-semantic-scholar",
  "papeline-store",
+ "rayon",
  "serde",
  "tokio",
  "toml",
@@ -3971,7 +3972,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
- "clap",
  "comfy-table",
  "divan",
  "glob",

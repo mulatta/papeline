@@ -44,6 +44,7 @@ pub fn process_gzip_shard<A: Accumulator>(
     parse_filter: impl FnMut(&str) -> Option<A::Row> + Clone,
 ) -> Result<GzipShardStats, ShardError> {
     retry_with_backoff(cfg.shard_label, pb, || {
+        let _permit = stream::acquire_download_permit();
         attempt_gzip_shard(cfg, pb, &new_acc, parse_filter.clone())
     })
 }

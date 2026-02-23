@@ -136,62 +136,6 @@ pub fn fetch_dataset_urls(
     Ok(())
 }
 
-/// Require API key from environment
-pub fn require_api_key() -> anyhow::Result<String> {
-    std::env::var("S2_API_KEY").context("S2_API_KEY environment variable required")
-}
-
-/// `release list` — print available release IDs
-pub fn cmd_release_list() -> anyhow::Result<()> {
-    let api_key = require_api_key()?;
-    let body = api_get_with_retry(
-        "https://api.semanticscholar.org/datasets/v1/release/",
-        &api_key,
-    )
-    .context("Failed to fetch releases")?;
-    let releases: Vec<String> = serde_json::from_str(&body).context("Invalid release list JSON")?;
-    for r in &releases {
-        println!("{r}");
-    }
-    Ok(())
-}
-
-/// `dataset list` — print datasets and shard counts for a release
-pub fn cmd_dataset_list(release: &str) -> anyhow::Result<()> {
-    let api_key = require_api_key()?;
-    let release_id = resolve_release(release, &api_key)?;
-
-    let url = format!("https://api.semanticscholar.org/datasets/v1/release/{release_id}");
-    let body = api_get_with_retry(&url, &api_key)
-        .with_context(|| format!("Failed to fetch release {release_id}"))?;
-    let parsed: serde_json::Value = serde_json::from_str(&body).context("Invalid release JSON")?;
-    let dataset_names: Vec<&str> = parsed["datasets"]
-        .as_array()
-        .context("No 'datasets' array in release response")?
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-
-    println!("Release: {release_id}");
-    println!("{:<45} Shards", "Dataset");
-    println!("{}", "-".repeat(52));
-
-    for name in &dataset_names {
-        let ds_url = format!(
-            "https://api.semanticscholar.org/datasets/v1/release/{release_id}/dataset/{name}"
-        );
-        let shard_count = match api_get_with_retry(&ds_url, &api_key) {
-            Ok(body) => serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v["files"].as_array().map(|a| a.len()))
-                .unwrap_or(0),
-            Err(_) => 0,
-        };
-        println!("{name:<45} {shard_count:>6}");
-    }
-    Ok(())
-}
-
 /// Load URLs from a dataset file, optionally limiting shard count
 pub fn load_urls(
     url_dir: &Path,

@@ -112,8 +112,8 @@ impl Default for WorkersConfig {
             .map(|n| n.get())
             .unwrap_or(4);
         Self {
-            default: cpus.min(8),
-            max: 16,
+            default: cpus,
+            max: cpus * 2,
         }
     }
 }

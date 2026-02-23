@@ -24,7 +24,6 @@ fn main() -> anyhow::Result<()> {
     log::info!("  Since: {:?}", config.since);
     log::info!("  Output: {}", config.output_dir.display());
     log::info!("  Max shards: {:?}", config.max_shards);
-    log::info!("  Workers: {}", config.workers);
 
     // Run pipeline
     let progress = std::sync::Arc::new(papeline_core::ProgressContext::new());
@@ -68,10 +67,6 @@ fn parse_args(args: &[String]) -> anyhow::Result<papeline_openalex::Config> {
                 i += 1;
                 config.max_shards = Some(args[i].parse()?);
             }
-            "--workers" | "-w" => {
-                i += 1;
-                config.workers = args[i].parse()?;
-            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -98,7 +93,6 @@ OPTIONS:
     -s, --since <DATE>      Only fetch records updated since DATE (YYYY-MM-DD)
     -o, --output <DIR>      Output directory [default: output]
     -l, --limit <N>         Maximum shards to process
-    -w, --workers <N>       Number of parallel workers [default: auto]
     -h, --help              Print help
 
 EXAMPLES:

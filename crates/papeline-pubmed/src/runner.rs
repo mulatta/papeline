@@ -70,38 +70,26 @@ fn run_entries(
     start: Instant,
 ) -> Result<Summary> {
     let total_files = entries.len();
-    log::info!(
-        "Processing {} files with {} workers",
-        total_files,
-        config.workers
-    );
+    log::info!("Processing {} files", total_files);
 
     let rows_counter = AtomicUsize::new(0);
     let completed_counter = AtomicUsize::new(0);
     let failed_counter = AtomicUsize::new(0);
 
-    // Build thread pool
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(config.workers)
-        .build()
-        .context("Failed to create thread pool")?;
+    // Process files in parallel using the global rayon pool
+    entries.par_iter().for_each(|entry| {
+        let pb = progress.shard_bar(&entry.filename);
 
-    // Process files in parallel
-    pool.install(|| {
-        entries.par_iter().for_each(|entry| {
-            let pb = progress.shard_bar(&entry.filename);
-
-            match worker::process_file(entry, &config.output_dir, config, pb, &rows_counter) {
-                Ok(count) => {
-                    completed_counter.fetch_add(1, Ordering::Relaxed);
-                    log::debug!("{}: {} articles", entry.filename, count);
-                }
-                Err(e) => {
-                    failed_counter.fetch_add(1, Ordering::Relaxed);
-                    log::error!("{}: {}", entry.filename, e);
-                }
+        match worker::process_file(entry, &config.output_dir, config, pb, &rows_counter) {
+            Ok(count) => {
+                completed_counter.fetch_add(1, Ordering::Relaxed);
+                log::debug!("{}: {} articles", entry.filename, count);
             }
-        });
+            Err(e) => {
+                failed_counter.fetch_add(1, Ordering::Relaxed);
+                log::error!("{}: {}", entry.filename, e);
+            }
+        }
     });
 
     let elapsed = start.elapsed();

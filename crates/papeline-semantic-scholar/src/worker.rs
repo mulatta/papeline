@@ -3,7 +3,6 @@
 use std::io::BufRead;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
@@ -17,10 +16,11 @@ use papeline_core::retry::retry_with_backoff;
 use papeline_core::shutdown_flag;
 use papeline_core::sink::{ErrorFlag, LanceSink, ParquetSink};
 use papeline_core::stream;
+use rayon::prelude::*;
+use std::sync::atomic::Ordering;
 
 use crate::config::Config;
 use crate::schema;
-use papeline_core::WorkQueue;
 
 use crate::state::{Dataset, ShardInfo};
 use crate::stats::{FilterShardStats, FilterSummary, PaperShardStats, PaperSummary};
@@ -79,21 +79,26 @@ pub fn process_paper_shards(
         })
         .collect();
 
-    let queue = WorkQueue::filtered(shards, |s| {
-        let filename = format!("{}_{:04}.parquet", s.dataset, s.shard_idx);
-        let path = release_dir.join(&filename);
-        if papeline_core::sink::is_valid_parquet(&path) {
-            log::debug!(
-                "Shard {}_{:04} already completed, skipping",
-                s.dataset,
-                s.shard_idx
-            );
-            false
-        } else {
-            true
-        }
-    });
-    if queue.total() == 0 {
+    // Filter out already-completed shards
+    let shards: Vec<ShardInfo> = shards
+        .into_iter()
+        .filter(|s| {
+            let filename = format!("{}_{:04}.parquet", s.dataset, s.shard_idx);
+            let path = release_dir.join(&filename);
+            if papeline_core::sink::is_valid_parquet(&path) {
+                log::debug!(
+                    "Shard {}_{:04} already completed, skipping",
+                    s.dataset,
+                    s.shard_idx
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if shards.is_empty() {
         log::info!("All paper shards already completed");
         // Ensure corpus_ids.bin exists (may need recovery)
         let corpus_ids_path = release_dir.join("corpus_ids.bin");
@@ -111,48 +116,34 @@ pub fn process_paper_shards(
     let shard_stats: Mutex<Vec<PaperShardStats>> = Mutex::new(Vec::new());
     let failed = Mutex::new(0usize);
     let is_tty = progress.is_tty();
-    let stagger_slot = AtomicUsize::new(0);
 
-    rayon::scope(|s| {
-        for _ in 0..config.workers {
-            s.spawn(|_| {
-                papeline_core::stream::stagger(stagger_slot.fetch_add(1, Ordering::Relaxed));
-                while let Some(shard) = queue.next() {
-                    if shutdown_flag().load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let shard_name = format!("papers_{:04}", shard.shard_idx);
-                    let pb = progress.shard_bar(&shard_name);
-                    pb.set_message("connecting...");
+    shards.par_iter().for_each(|shard| {
+        if shutdown_flag().load(Ordering::Relaxed) {
+            return;
+        }
+        let shard_name = format!("papers_{:04}", shard.shard_idx);
+        let pb = progress.shard_bar(&shard_name);
+        pb.set_message("connecting...");
 
-                    match process_paper_shard(
-                        shard,
-                        release_dir,
-                        &config.domains,
-                        config.zstd_level,
-                        &pb,
-                    ) {
-                        Ok((ids, stats)) => {
-                            pb.finish_and_clear();
-                            if !is_tty {
-                                stats.log();
-                            }
-                            corpus_ids
-                                .lock()
-                                .expect("worker thread panicked")
-                                .extend(ids);
-                            shard_stats
-                                .lock()
-                                .expect("worker thread panicked")
-                                .push(stats);
-                        }
-                        Err(()) => {
-                            pb.finish_and_clear();
-                            *failed.lock().expect("worker thread panicked") += 1;
-                        }
-                    }
+        match process_paper_shard(shard, release_dir, &config.domains, config.zstd_level, &pb) {
+            Ok((ids, stats)) => {
+                pb.finish_and_clear();
+                if !is_tty {
+                    stats.log();
                 }
-            });
+                corpus_ids
+                    .lock()
+                    .expect("worker thread panicked")
+                    .extend(ids);
+                shard_stats
+                    .lock()
+                    .expect("worker thread panicked")
+                    .push(stats);
+            }
+            Err(()) => {
+                pb.finish_and_clear();
+                *failed.lock().expect("worker thread panicked") += 1;
+            }
         }
     });
 
@@ -194,29 +185,34 @@ pub fn process_filtered_shards(
         })
         .collect();
 
-    let queue = WorkQueue::filtered(shard_infos, |s| {
-        if s.dataset == Dataset::Embeddings {
-            let done = release_dir.join("embeddings.lance.done");
-            if done.exists() {
-                log::debug!("embeddings already completed (lance), skipping");
-                return false;
+    // Filter out already-completed shards
+    let shard_infos: Vec<ShardInfo> = shard_infos
+        .into_iter()
+        .filter(|s| {
+            if s.dataset == Dataset::Embeddings {
+                let done = release_dir.join("embeddings.lance.done");
+                if done.exists() {
+                    log::debug!("embeddings already completed (lance), skipping");
+                    return false;
+                }
+                return true; // always reprocess (overwrite mode)
             }
-            return true; // always reprocess (overwrite mode)
-        }
-        let filename = format!("{}_{:04}.parquet", s.dataset, s.shard_idx);
-        let path = release_dir.join(&filename);
-        if papeline_core::sink::is_valid_parquet(&path) {
-            log::debug!(
-                "Shard {}_{:04} already completed, skipping",
-                s.dataset,
-                s.shard_idx
-            );
-            false
-        } else {
-            true
-        }
-    });
-    if queue.total() == 0 {
+            let filename = format!("{}_{:04}.parquet", s.dataset, s.shard_idx);
+            let path = release_dir.join(&filename);
+            if papeline_core::sink::is_valid_parquet(&path) {
+                log::debug!(
+                    "Shard {}_{:04} already completed, skipping",
+                    s.dataset,
+                    s.shard_idx
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    if shard_infos.is_empty() {
         log::info!("All phase 2 shards already completed");
         return (0, FilterSummary::default());
     }
@@ -224,45 +220,37 @@ pub fn process_filtered_shards(
     let failed = Mutex::new(0usize);
     let shard_stats: Mutex<Vec<FilterShardStats>> = Mutex::new(Vec::new());
     let is_tty = progress.is_tty();
-    let stagger_slot2 = AtomicUsize::new(0);
 
-    rayon::scope(|s| {
-        for _ in 0..config.workers {
-            s.spawn(|_| {
-                papeline_core::stream::stagger(stagger_slot2.fetch_add(1, Ordering::Relaxed));
-                while let Some(shard) = queue.next() {
-                    if shutdown_flag().load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let shard_name = format!("{}_{:04}", shard.dataset, shard.shard_idx);
-                    let pb = progress.shard_bar(&shard_name);
-                    pb.set_message("connecting...");
+    shard_infos.par_iter().for_each(|shard| {
+        if shutdown_flag().load(Ordering::Relaxed) {
+            return;
+        }
+        let shard_name = format!("{}_{:04}", shard.dataset, shard.shard_idx);
+        let pb = progress.shard_bar(&shard_name);
+        pb.set_message("connecting...");
 
-                    match process_filtered_shard(
-                        shard,
-                        corpus_ids,
-                        release_dir,
-                        lance,
-                        config.zstd_level,
-                        &pb,
-                    ) {
-                        Ok(stats) => {
-                            pb.finish_and_clear();
-                            if !is_tty {
-                                stats.log();
-                            }
-                            shard_stats
-                                .lock()
-                                .expect("worker thread panicked")
-                                .push(stats);
-                        }
-                        Err(()) => {
-                            pb.finish_and_clear();
-                            *failed.lock().expect("worker thread panicked") += 1;
-                        }
-                    }
+        match process_filtered_shard(
+            shard,
+            corpus_ids,
+            release_dir,
+            lance,
+            config.zstd_level,
+            &pb,
+        ) {
+            Ok(stats) => {
+                pb.finish_and_clear();
+                if !is_tty {
+                    stats.log();
                 }
-            });
+                shard_stats
+                    .lock()
+                    .expect("worker thread panicked")
+                    .push(stats);
+            }
+            Err(()) => {
+                pb.finish_and_clear();
+                *failed.lock().expect("worker thread panicked") += 1;
+            }
         }
     });
 
@@ -461,6 +449,7 @@ fn attempt_paper_shard(
     zstd_level: i32,
     pb: &ProgressBar,
 ) -> Result<(Vec<i64>, PaperShardStats), ShardError> {
+    let _permit = stream::acquire_download_permit();
     let start = Instant::now();
     let (mut reader, counter, total_bytes) =
         stream::open_gzip_reader(&shard.url).map_err(ShardError::Stream)?;
@@ -585,6 +574,7 @@ fn attempt_filtered_shard(
     zstd_level: i32,
     pb: &ProgressBar,
 ) -> Result<FilterShardStats, ShardError> {
+    let _permit = stream::acquire_download_permit();
     let start = Instant::now();
     let (mut reader, counter, total_bytes) =
         stream::open_gzip_reader(&shard.url).map_err(ShardError::Stream)?;
