@@ -15,6 +15,7 @@ papeline-semantic-scholar.workspace = true
 papeline-join.workspace = true
 papeline-store.workspace = true
 
+comfy-table.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

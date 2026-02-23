@@ -3706,6 +3706,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "comfy-table",
  "directories",
  "env_logger",
  "log",

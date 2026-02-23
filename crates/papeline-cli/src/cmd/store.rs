@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Args, Subcommand};
+use comfy_table::{Cell, Color, Table, modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL};
 
 use papeline_store::Store;
 
@@ -50,34 +51,50 @@ pub fn run(args: StoreArgs) -> Result<()> {
     }
 }
 
+fn short(hash: &str) -> &str {
+    &hash[..std::cmp::min(8, hash.len())]
+}
+
 fn list(dir: &Path) -> Result<()> {
     let store = Store::new(dir)?;
     let entries = store.list()?;
 
     if entries.is_empty() {
-        println!("No cached entries.");
+        eprintln!("No cached entries.");
         return Ok(());
     }
 
-    println!(
-        "{:<10} {:<10} {:<6} {:<10} {:<18} Ref",
-        "Hash", "Stage", "Files", "Content", "Created"
-    );
-    println!("{}", "-".repeat(70));
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .apply_modifier(UTF8_ROUND_CORNERS)
+        .set_header(vec![
+            Cell::new("Hash").fg(Color::Cyan),
+            Cell::new("Stage").fg(Color::Cyan),
+            Cell::new("Files").fg(Color::Cyan),
+            Cell::new("Content").fg(Color::Cyan),
+            Cell::new("Created").fg(Color::Cyan),
+            Cell::new("Ref").fg(Color::Cyan),
+        ]);
 
     for entry in &entries {
-        let ref_str = if entry.referenced { "yes" } else { "no" };
-        println!(
-            "{:<10} {:<10} {:<6} {:<10} {:<18} {ref_str}",
-            entry.input_hash,
-            format!("{:?}", entry.stage).to_lowercase(),
-            entry.file_count,
-            entry.content_hash,
-            entry.created_at,
-        );
+        let ref_cell = if entry.referenced {
+            Cell::new("yes").fg(Color::Green)
+        } else {
+            Cell::new("no").fg(Color::DarkGrey)
+        };
+        table.add_row(vec![
+            Cell::new(&entry.input_hash),
+            Cell::new(entry.stage),
+            Cell::new(entry.file_count),
+            Cell::new(short(&entry.content_hash)),
+            Cell::new(&entry.created_at),
+            ref_cell,
+        ]);
     }
 
-    println!("\n{} entries total", entries.len());
+    eprintln!("\n{table}");
+    eprintln!("{} entries total", entries.len());
     Ok(())
 }
 
@@ -85,29 +102,42 @@ fn gc(dir: &Path, confirm: bool) -> Result<()> {
     let store = Store::new(dir)?;
 
     if !confirm {
-        // Dry-run: show what would be removed
         let entries = store.list()?;
         let unreferenced: Vec<_> = entries.iter().filter(|e| !e.referenced).collect();
 
         if unreferenced.is_empty() {
-            println!("No unreferenced entries to remove.");
+            eprintln!("No unreferenced entries to remove.");
         } else {
-            println!("Would remove {} unreferenced entries:", unreferenced.len());
+            let mut table = Table::new();
+            table
+                .load_preset(UTF8_FULL)
+                .apply_modifier(UTF8_ROUND_CORNERS)
+                .set_header(vec![
+                    Cell::new("Hash").fg(Color::Cyan),
+                    Cell::new("Stage").fg(Color::Cyan),
+                ]);
+
             for entry in &unreferenced {
-                println!("  {} ({:?})", entry.input_hash, entry.stage);
+                table.add_row(vec![Cell::new(&entry.input_hash), Cell::new(entry.stage)]);
             }
-            println!("\nRun with --confirm to actually delete.");
+
+            eprintln!(
+                "\nWould remove {} unreferenced entries:",
+                unreferenced.len()
+            );
+            eprintln!("{table}");
+            eprintln!("Run with --confirm to actually delete.");
         }
         return Ok(());
     }
 
     let removed = store.gc()?;
     if removed.is_empty() {
-        println!("Nothing to clean up.");
+        eprintln!("Nothing to clean up.");
     } else {
-        println!("Removed {} entries:", removed.len());
+        eprintln!("Removed {} entries:", removed.len());
         for hash in &removed {
-            println!("  {hash}");
+            eprintln!("  {hash}");
         }
     }
     Ok(())
@@ -122,20 +152,45 @@ fn verify(dir: &Path, hash: Option<&str>) -> Result<()> {
     } else {
         let all = store.verify_all()?;
         if all.is_empty() {
-            println!("No entries to verify.");
+            eprintln!("No entries to verify.");
             return Ok(());
         }
+
+        let mut table = Table::new();
+        table
+            .load_preset(UTF8_FULL)
+            .apply_modifier(UTF8_ROUND_CORNERS)
+            .set_header(vec![
+                Cell::new("Hash").fg(Color::Cyan),
+                Cell::new("Files").fg(Color::Cyan),
+                Cell::new("Status").fg(Color::Cyan),
+            ]);
+
         let mut all_ok = true;
         for (h, results) in &all {
-            let ok = print_verify_results(h, results);
+            let ok = results.iter().all(|r| r.ok);
             if !ok {
                 all_ok = false;
             }
+            let status_cell = if ok {
+                Cell::new("OK").fg(Color::Green)
+            } else {
+                Cell::new("FAIL").fg(Color::Red)
+            };
+            table.add_row(vec![Cell::new(h), Cell::new(results.len()), status_cell]);
         }
+
+        eprintln!("\n{table}");
+
+        // Show mismatch details after summary table
+        for (h, results) in &all {
+            print_mismatches(h, results);
+        }
+
         if all_ok {
-            println!("\nAll entries verified OK.");
+            eprintln!("All entries verified OK.");
         } else {
-            println!("\nSome entries have integrity issues!");
+            eprintln!("Some entries have integrity issues!");
         }
     }
     Ok(())
@@ -144,18 +199,19 @@ fn verify(dir: &Path, hash: Option<&str>) -> Result<()> {
 fn print_verify_results(hash: &str, results: &[papeline_store::store::VerifyResult]) -> bool {
     let all_ok = results.iter().all(|r| r.ok);
     let status = if all_ok { "OK" } else { "FAIL" };
-    println!("[{status}] {hash}");
+    eprintln!("[{status}] {hash} ({} files)", results.len());
 
-    for r in results {
-        if !r.ok {
-            println!("  MISMATCH: {}", r.path);
-            println!("    expected: {}", &r.expected[..16]);
-            println!(
-                "    actual:   {}",
-                &r.actual[..std::cmp::min(16, r.actual.len())]
-            );
-        }
-    }
+    print_mismatches(hash, results);
 
     all_ok
+}
+
+fn print_mismatches(hash: &str, results: &[papeline_store::store::VerifyResult]) {
+    for r in results {
+        if !r.ok {
+            eprintln!("  MISMATCH in {hash}: {}", r.path);
+            eprintln!("    expected: {}", short(&r.expected));
+            eprintln!("    actual:   {}", short(&r.actual));
+        }
+    }
 }

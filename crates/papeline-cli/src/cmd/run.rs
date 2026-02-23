@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Args;
+use comfy_table::{Cell, Color, Table, modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL};
 
 use papeline_store::run_config::Defaults;
 use papeline_store::stage::StageName;
@@ -39,17 +40,19 @@ struct StagePlan {
     manifest: Option<StageManifest>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum StageStatus {
     Cached,
     NeedsRun,
+    Pending,
 }
 
-impl std::fmt::Display for StageStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl StageStatus {
+    fn cell(self) -> Cell {
         match self {
-            Self::Cached => write!(f, "CACHED"),
-            Self::NeedsRun => write!(f, "NEEDS_RUN"),
+            Self::Cached => Cell::new("cached").fg(Color::Green),
+            Self::NeedsRun => Cell::new("run").fg(Color::Yellow),
+            Self::Pending => Cell::new("pending").fg(Color::DarkGrey),
         }
     }
 }
@@ -76,7 +79,7 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
             let api_key = std::env::var("S2_API_KEY")
                 .context("S2_API_KEY required to resolve 'latest' release")?;
             let id = papeline_semantic_scholar::api::resolve_release(&release_str, &api_key)?;
-            log::info!("Resolved S2 release 'latest' → {id}");
+            log::info!("Resolved S2 release 'latest' -> {id}");
             Some(id)
         } else {
             Some(release_str)
@@ -121,32 +124,53 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
         }
     }
 
-    // 4. Display plan
-    println!("=== Pipeline Plan ===");
-    println!("{:<12} {:<10} {:<10}", "Stage", "Hash", "Status");
-    println!("{}", "-".repeat(34));
-    for plan in &fetch_plans {
-        println!(
-            "{:<12} {:<10} {:<10}",
-            plan.name,
-            plan.input.short_hash(),
-            plan.status
-        );
+    // 4. Compute join plan if possible (even for dry-run)
+    let mut join_plan: Option<StagePlan> = None;
+    if run_config.should_join() {
+        // Try to compute join input hash from cached fetch manifests
+        let all_cached = fetch_plans.iter().all(|p| p.manifest.is_some());
+
+        if all_cached {
+            let pm_hash = get_content_hash(&fetch_plans, StageName::Pubmed)?;
+            let oa_hash = get_content_hash(&fetch_plans, StageName::Openalex)?;
+            let s2_hash = get_content_hash(&fetch_plans, StageName::S2)?;
+
+            let join_input = run_config
+                .join_input(&pm_hash, &oa_hash, &s2_hash)
+                .expect("should_join() was true");
+
+            let (status, manifest) = check_cache(&store, &join_input, args.force);
+            join_plan = Some(StagePlan {
+                name: StageName::Join,
+                input: join_input,
+                status,
+                manifest,
+            });
+        } else {
+            // Can't compute join hash yet — some fetch stages need to run first
+            // Use a dummy input for display purposes
+            let dummy_input = run_config
+                .join_input("(pending)", "(pending)", "(pending)")
+                .expect("should_join() was true");
+            join_plan = Some(StagePlan {
+                name: StageName::Join,
+                input: dummy_input,
+                status: StageStatus::Pending,
+                manifest: None,
+            });
+        }
     }
 
-    if run_config.should_join() {
-        println!("{:<12} {:<10} {:<10}", "join", "(pending)", "(after fetch)");
-    }
-    println!();
+    // 5. Display plan table
+    print_plan_table(&fetch_plans, join_plan.as_ref());
 
     if args.dry_run {
-        println!("(dry-run mode, no execution)");
         return Ok(());
     }
 
-    // 5. Execute fetch stages that need running
+    // 6. Execute fetch stages that need running
     for plan in &mut fetch_plans {
-        if matches!(plan.status, StageStatus::Cached) {
+        if plan.status == StageStatus::Cached {
             log::info!("{}: cached ({})", plan.name, plan.input.short_hash());
             continue;
         }
@@ -185,22 +209,11 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
         plan.status = StageStatus::Cached;
     }
 
-    // 6. Join stage
-    let mut join_plan: Option<StagePlan> = None;
+    // 7. Join stage (recompute hash now that all fetches are done)
     if run_config.should_join() {
-        // Get content hashes from all 3 fetch stages
-        let get_content_hash = |name: StageName| -> Result<String> {
-            fetch_plans
-                .iter()
-                .find(|p| p.name == name)
-                .and_then(|p| p.manifest.as_ref())
-                .map(|m| m.content_hash.clone())
-                .with_context(|| format!("{name} manifest missing for join"))
-        };
-
-        let pm_hash = get_content_hash(StageName::Pubmed)?;
-        let oa_hash = get_content_hash(StageName::Openalex)?;
-        let s2_hash = get_content_hash(StageName::S2)?;
+        let pm_hash = get_content_hash(&fetch_plans, StageName::Pubmed)?;
+        let oa_hash = get_content_hash(&fetch_plans, StageName::Openalex)?;
+        let s2_hash = get_content_hash(&fetch_plans, StageName::S2)?;
 
         let join_input = run_config
             .join_input(&pm_hash, &oa_hash, &s2_hash)
@@ -208,14 +221,7 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
 
         let (status, manifest) = check_cache(&store, &join_input, args.force);
 
-        println!(
-            "{:<12} {:<10} {:<10}",
-            "join",
-            join_input.short_hash(),
-            status
-        );
-
-        if matches!(status, StageStatus::Cached) {
+        if status == StageStatus::Cached {
             log::info!("join: cached ({})", join_input.short_hash());
             join_plan = Some(StagePlan {
                 name: StageName::Join,
@@ -231,7 +237,6 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
             }
             std::fs::create_dir_all(&tmp_dir)?;
 
-            // Get stage directories for join inputs
             let pm_plan = fetch_plans
                 .iter()
                 .find(|p| p.name == StageName::Pubmed)
@@ -276,10 +281,10 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
         }
     }
 
-    // 7. Create run entry
+    // 8. Create run entry
     let mut all_stages: Vec<(StageName, &StageInput, &StageManifest, bool)> = Vec::new();
     for plan in &fetch_plans {
-        let was_cached = matches!(plan.status, StageStatus::Cached);
+        let was_cached = plan.status == StageStatus::Cached;
         all_stages.push((
             plan.name,
             &plan.input,
@@ -292,31 +297,104 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
             jp.name,
             &jp.input,
             jp.manifest.as_ref().unwrap(),
-            matches!(jp.status, StageStatus::Cached),
+            jp.status == StageStatus::Cached,
         ));
     }
 
     let run_dir = store.create_run(&all_stages)?;
 
-    // 8. Summary
-    println!();
-    println!("=== Run Complete ===");
-    println!("Run: {}", run_dir.display());
-    println!("{:<12} {:<10} {:<10} Status", "Stage", "Hash", "Content");
-    println!("{}", "-".repeat(50));
-    for plan in fetch_plans.iter().chain(join_plan.iter()) {
+    // 9. Summary
+    print_summary_table(&fetch_plans, join_plan.as_ref(), &run_dir);
+
+    Ok(())
+}
+
+fn print_plan_table(fetch_plans: &[StagePlan], join_plan: Option<&StagePlan>) {
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .apply_modifier(UTF8_ROUND_CORNERS)
+        .set_header(vec![
+            Cell::new("Stage").fg(Color::Cyan),
+            Cell::new("Input").fg(Color::Cyan),
+            Cell::new("Content").fg(Color::Cyan),
+            Cell::new("Status").fg(Color::Cyan),
+        ]);
+
+    for plan in fetch_plans {
+        let content = plan
+            .manifest
+            .as_ref()
+            .map(|m| m.content_hash[..8].to_string())
+            .unwrap_or_else(|| "-".into());
+        table.add_row(vec![
+            Cell::new(plan.name),
+            Cell::new(plan.input.short_hash()),
+            Cell::new(content),
+            plan.status.cell(),
+        ]);
+    }
+
+    if let Some(jp) = join_plan {
+        let (hash_str, content) = if jp.status == StageStatus::Pending {
+            ("-".into(), "-".into())
+        } else {
+            let content = jp
+                .manifest
+                .as_ref()
+                .map(|m| m.content_hash[..8].to_string())
+                .unwrap_or_else(|| "-".into());
+            (jp.input.short_hash(), content)
+        };
+        table.add_row(vec![
+            Cell::new(jp.name),
+            Cell::new(hash_str),
+            Cell::new(content),
+            jp.status.cell(),
+        ]);
+    }
+
+    eprintln!("\n{table}");
+}
+
+fn print_summary_table(
+    fetch_plans: &[StagePlan],
+    join_plan: Option<&StagePlan>,
+    run_dir: &std::path::Path,
+) {
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .apply_modifier(UTF8_ROUND_CORNERS)
+        .set_header(vec![
+            Cell::new("Stage").fg(Color::Cyan),
+            Cell::new("Input").fg(Color::Cyan),
+            Cell::new("Content").fg(Color::Cyan),
+            Cell::new("Status").fg(Color::Cyan),
+        ]);
+
+    for plan in fetch_plans.iter().chain(join_plan) {
         if let Some(ref m) = plan.manifest {
-            println!(
-                "{:<12} {:<10} {:<10} {}",
-                plan.name,
-                plan.input.short_hash(),
-                &m.content_hash[..8],
-                plan.status
-            );
+            table.add_row(vec![
+                Cell::new(plan.name),
+                Cell::new(plan.input.short_hash()),
+                Cell::new(&m.content_hash[..8]),
+                plan.status.cell(),
+            ]);
         }
     }
 
-    Ok(())
+    eprintln!("\n{table}");
+    eprintln!("Run: {}", run_dir.display());
+}
+
+fn get_content_hash(plans: &[StagePlan], name: StageName) -> Result<String> {
+    plans
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| p.manifest.as_ref())
+        .map(|m| m.content_hash.clone())
+        .with_context(|| format!("{name} manifest missing for join"))
 }
 
 fn check_cache(
