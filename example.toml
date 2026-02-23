@@ -1,0 +1,15 @@
+output = "./data"
+zstd_level = 6
+
+[pubmed]
+limit = 2
+
+[openalex]
+limit = 2
+
+[s2]
+domains = ["Biology", "Medicine"]
+limit = 2
+
+[join]
+memory_limit = "48GB"
