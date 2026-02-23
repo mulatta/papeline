@@ -1,13 +1,16 @@
 //! `papeline run` - orchestrate full pipeline from run.toml
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Args;
 use comfy_table::{Cell, Color, Table, modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL};
+use indicatif::ProgressBar;
 
-use papeline_store::run_config::Defaults;
+use papeline_core::SharedProgress;
+use papeline_store::run_config::{
+    Defaults, JoinStageConfig, OpenAlexStageConfig, PubmedStageConfig, S2StageConfig,
+};
 use papeline_store::stage::StageName;
 use papeline_store::store::LookupResult;
 use papeline_store::{RunConfig, StageInput, StageManifest, Store};
@@ -16,8 +19,8 @@ use crate::config::Config;
 
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    /// Path to run.toml
-    pub run_config: PathBuf,
+    /// Path to run.toml (optional)
+    pub run_config: Option<PathBuf>,
 
     /// Force re-run all stages (ignore cache)
     #[arg(long)]
@@ -30,6 +33,123 @@ pub struct RunArgs {
     /// Number of parallel workers
     #[arg(short, long)]
     pub workers: Option<usize>,
+
+    /// Output directory
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub pm: PubmedFlags,
+
+    #[command(flatten)]
+    pub oa: OpenAlexFlags,
+
+    #[command(flatten)]
+    pub s2: S2Flags,
+
+    #[command(flatten)]
+    pub join_flags: JoinFlags,
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "PubMed")]
+pub struct PubmedFlags {
+    /// Enable PubMed stage
+    #[arg(long)]
+    pub pm: bool,
+    /// Maximum files to process
+    #[arg(long)]
+    pub pm_limit: Option<usize>,
+    /// PubMed FTP base URL
+    #[arg(long)]
+    pub pm_base_url: Option<String>,
+    /// Zstd compression level for PubMed
+    #[arg(long)]
+    pub pm_zstd: Option<i32>,
+}
+
+impl PubmedFlags {
+    fn is_active(&self) -> bool {
+        self.pm || self.pm_limit.is_some() || self.pm_base_url.is_some() || self.pm_zstd.is_some()
+    }
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "OpenAlex")]
+pub struct OpenAlexFlags {
+    /// Enable OpenAlex stage
+    #[arg(long)]
+    pub oa: bool,
+    /// Entity type (works, authors, ...)
+    #[arg(long)]
+    pub oa_entity: Option<String>,
+    /// Only records updated since date (YYYY-MM-DD)
+    #[arg(long)]
+    pub oa_since: Option<String>,
+    /// Maximum shards
+    #[arg(long)]
+    pub oa_limit: Option<usize>,
+    /// Zstd compression level for OpenAlex
+    #[arg(long)]
+    pub oa_zstd: Option<i32>,
+}
+
+impl OpenAlexFlags {
+    fn is_active(&self) -> bool {
+        self.oa
+            || self.oa_entity.is_some()
+            || self.oa_since.is_some()
+            || self.oa_limit.is_some()
+            || self.oa_zstd.is_some()
+    }
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Semantic Scholar")]
+pub struct S2Flags {
+    /// Enable S2 stage
+    #[arg(long)]
+    pub s2: bool,
+    /// FoS domain filter (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub s2_domains: Option<Vec<String>>,
+    /// Release ID or "latest"
+    #[arg(long)]
+    pub s2_release: Option<String>,
+    /// Datasets (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub s2_datasets: Option<Vec<String>>,
+    /// Maximum shards
+    #[arg(long)]
+    pub s2_limit: Option<usize>,
+    /// Zstd compression level for S2
+    #[arg(long)]
+    pub s2_zstd: Option<i32>,
+}
+
+impl S2Flags {
+    fn is_active(&self) -> bool {
+        self.s2
+            || self.s2_domains.is_some()
+            || self.s2_release.is_some()
+            || self.s2_datasets.is_some()
+            || self.s2_limit.is_some()
+            || self.s2_zstd.is_some()
+    }
+}
+
+#[derive(Args, Debug)]
+#[command(next_help_heading = "Join")]
+pub struct JoinFlags {
+    /// DuckDB memory limit (e.g. "16GB")
+    #[arg(long)]
+    pub join_memory: Option<String>,
+}
+
+impl JoinFlags {
+    fn is_active(&self) -> bool {
+        self.join_memory.is_some()
+    }
 }
 
 /// Stage execution plan entry.
@@ -55,19 +175,139 @@ impl StageStatus {
             Self::Pending => Cell::new("pending").fg(Color::DarkGrey),
         }
     }
+
+    fn ansi(self) -> &'static str {
+        match self {
+            Self::Cached => "\x1b[32mcached\x1b[0m",
+            Self::NeedsRun => "\x1b[33mrun\x1b[0m",
+            Self::Pending => "\x1b[2mpending\x1b[0m",
+        }
+    }
 }
 
-pub fn run(args: RunArgs, config: &Config) -> Result<()> {
-    // 1. Parse run.toml
-    let run_config = RunConfig::from_file(&args.run_config)
-        .with_context(|| format!("failed to load {}", args.run_config.display()))?;
+/// Format a stage line message: `{input_hash}  {content_hash}  {status}`
+fn stage_msg(plan: &StagePlan) -> String {
+    let input = if plan.status == StageStatus::Pending {
+        "-".to_string()
+    } else {
+        plan.input.short_hash()
+    };
+    let content = plan
+        .manifest
+        .as_ref()
+        .map(|m| m.content_hash[..8].to_string())
+        .unwrap_or_else(|| "-".into());
+    format!("{input:<10} {content:<10} {}", plan.status.ansi())
+}
+
+fn stage_msg_running(plan: &StagePlan) -> String {
+    let input = plan.input.short_hash();
+    format!("{input:<10} {:<10} \x1b[33mrunning\x1b[0m", "-")
+}
+
+fn stage_msg_done(plan: &StagePlan) -> String {
+    let input = plan.input.short_hash();
+    let content = plan
+        .manifest
+        .as_ref()
+        .map(|m| m.content_hash[..8].to_string())
+        .unwrap_or_else(|| "-".into());
+    format!("{input:<10} {content:<10} \x1b[32mcached\x1b[0m")
+}
+
+fn apply_cli_overrides(config: &mut RunConfig, args: &RunArgs) {
+    if let Some(ref output) = args.output {
+        config.output = output.clone();
+    }
+
+    // PubMed
+    if args.pm.is_active() {
+        let cfg = config.pubmed.get_or_insert_with(PubmedStageConfig::default);
+        if let Some(v) = args.pm.pm_limit {
+            cfg.limit = Some(v);
+        }
+        if let Some(ref v) = args.pm.pm_base_url {
+            cfg.base_url = Some(v.clone());
+        }
+        if let Some(v) = args.pm.pm_zstd {
+            cfg.zstd_level = Some(v);
+        }
+    }
+
+    // OpenAlex
+    if args.oa.is_active() {
+        let cfg = config
+            .openalex
+            .get_or_insert_with(OpenAlexStageConfig::default);
+        if let Some(ref v) = args.oa.oa_entity {
+            cfg.entity = Some(v.clone());
+        }
+        if let Some(ref v) = args.oa.oa_since {
+            cfg.since = Some(v.clone());
+        }
+        if let Some(v) = args.oa.oa_limit {
+            cfg.limit = Some(v);
+        }
+        if let Some(v) = args.oa.oa_zstd {
+            cfg.zstd_level = Some(v);
+        }
+    }
+
+    // S2
+    if args.s2.is_active() {
+        let cfg = config.s2.get_or_insert_with(|| S2StageConfig {
+            domains: Vec::new(),
+            release: None,
+            datasets: None,
+            limit: None,
+            zstd_level: None,
+        });
+        if let Some(ref v) = args.s2.s2_domains {
+            cfg.domains = v.clone();
+        }
+        if let Some(ref v) = args.s2.s2_release {
+            cfg.release = Some(v.clone());
+        }
+        if let Some(ref v) = args.s2.s2_datasets {
+            cfg.datasets = Some(v.clone());
+        }
+        if let Some(v) = args.s2.s2_limit {
+            cfg.limit = Some(v);
+        }
+        if let Some(v) = args.s2.s2_zstd {
+            cfg.zstd_level = Some(v);
+        }
+    }
+
+    // Join
+    if args.join_flags.is_active() {
+        let cfg = config.join.get_or_insert_with(JoinStageConfig::default);
+        if let Some(ref v) = args.join_flags.join_memory {
+            cfg.memory_limit = v.clone();
+        }
+    }
+}
+
+pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<()> {
+    // 1. Load RunConfig (from file or empty)
+    let mut run_config = match &args.run_config {
+        Some(path) => RunConfig::from_file(path)
+            .with_context(|| format!("failed to load {}", path.display()))?,
+        None => RunConfig::empty(),
+    };
+
+    // 2. Apply CLI overrides
+    apply_cli_overrides(&mut run_config, &args);
+
+    // 3. Validate
     run_config.validate()?;
+
+    if run_config.active_fetch_stages().is_empty() {
+        anyhow::bail!("no stages enabled; use --pm, --oa, --s2 flags or provide a run.toml");
+    }
 
     let defaults = Defaults {
         pubmed_base_url: config.pubmed.base_url.clone(),
-        openalex_base_url: config.openalex.base_url.clone(),
-        s2_api_url: config.s2.api_url.clone(),
-        zstd_level: config.output.compression_level,
     };
 
     let workers = args.workers.unwrap_or(config.workers.default);
@@ -102,7 +342,7 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
         });
     }
 
-    if let Some(input) = run_config.openalex_input(&defaults) {
+    if let Some(input) = run_config.openalex_input() {
         let (status, manifest) = check_cache(&store, &input, args.force);
         fetch_plans.push(StagePlan {
             name: StageName::Openalex,
@@ -161,21 +401,42 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
         }
     }
 
-    // 5. Display plan table
-    print_plan_table(&fetch_plans, join_plan.as_ref());
-
+    // 5. Display plan
     if args.dry_run {
+        print_plan_table(&fetch_plans, join_plan.as_ref());
         return Ok(());
     }
 
+    // Create live stage lines (stop spinner immediately for cached stages)
+    let fetch_lines: Vec<ProgressBar> = fetch_plans
+        .iter()
+        .map(|p| {
+            let pb = progress.stage_line(&p.name.to_string());
+            pb.set_message(stage_msg(p));
+            if p.status == StageStatus::Cached {
+                pb.finish();
+            }
+            pb
+        })
+        .collect();
+    let join_line: Option<ProgressBar> = join_plan.as_ref().map(|jp| {
+        let pb = progress.stage_line(&jp.name.to_string());
+        pb.set_message(stage_msg(jp));
+        if jp.status != StageStatus::NeedsRun {
+            pb.finish();
+        }
+        pb
+    });
+
     // 6. Execute fetch stages that need running
-    for plan in &mut fetch_plans {
+    for (i, plan) in fetch_plans.iter_mut().enumerate() {
         if plan.status == StageStatus::Cached {
-            log::info!("{}: cached ({})", plan.name, plan.input.short_hash());
             continue;
         }
 
-        log::info!("{}: executing...", plan.name);
+        fetch_lines[i].enable_steady_tick(std::time::Duration::from_millis(80));
+        fetch_lines[i].set_message(stage_msg_running(plan));
+
         let tmp_dir = store.stage_tmp_dir(&plan.input);
 
         // Clean stale tmp
@@ -186,27 +447,25 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
 
         match plan.name {
             StageName::Pubmed => {
-                run_pubmed(&run_config, config, &tmp_dir, workers)?;
+                run_pubmed(&run_config, config, &tmp_dir, workers, progress)?;
             }
             StageName::Openalex => {
-                run_openalex(&run_config, config, &tmp_dir, workers)?;
+                run_openalex(&run_config, config, &tmp_dir, workers, progress)?;
             }
             StageName::S2 => {
                 let release_id = s2_release_id.as_ref().unwrap();
-                run_s2(&run_config, config, &tmp_dir, workers, release_id)?;
+                run_s2(&run_config, config, &tmp_dir, workers, release_id, progress)?;
             }
             StageName::Join => unreachable!("join handled separately"),
         }
 
-        let recursive = plan.name == StageName::S2;
+        let recursive = false;
         let manifest = store.commit_stage(&plan.input, &tmp_dir, recursive)?;
-        log::info!(
-            "{}: committed (content_hash: {})",
-            plan.name,
-            &manifest.content_hash[..8]
-        );
         plan.manifest = Some(manifest);
         plan.status = StageStatus::Cached;
+
+        fetch_lines[i].set_message(stage_msg_done(plan));
+        fetch_lines[i].finish();
     }
 
     // 7. Join stage (recompute hash now that all fetches are done)
@@ -222,15 +481,29 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
         let (status, manifest) = check_cache(&store, &join_input, args.force);
 
         if status == StageStatus::Cached {
-            log::info!("join: cached ({})", join_input.short_hash());
             join_plan = Some(StagePlan {
                 name: StageName::Join,
                 input: join_input,
                 status: StageStatus::Cached,
                 manifest,
             });
+            if let Some(ref jl) = join_line {
+                jl.set_message(stage_msg(join_plan.as_ref().unwrap()));
+                jl.finish();
+            }
         } else {
-            log::info!("join: executing...");
+            // Update join line: now we know the real hash
+            let mut jp = StagePlan {
+                name: StageName::Join,
+                input: join_input.clone(),
+                status: StageStatus::NeedsRun,
+                manifest: None,
+            };
+            if let Some(ref jl) = join_line {
+                jl.enable_steady_tick(std::time::Duration::from_millis(80));
+                jl.set_message(stage_msg_running(&jp));
+            }
+
             let tmp_dir = store.stage_tmp_dir(&join_input);
             if tmp_dir.exists() {
                 std::fs::remove_dir_all(&tmp_dir)?;
@@ -258,26 +531,38 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
                 memory_limit: run_config.join_memory_limit(),
             };
 
-            let summary = papeline_join::run(&join_config)?;
+            let jl_ref = join_line.as_ref();
+            let summary = papeline_join::run_with_progress(&join_config, |step, desc| {
+                if let Some(jl) = jl_ref {
+                    jl.set_message(format!(
+                        "{:<10} {:<10} \x1b[33mstep {step}/8: {desc}\x1b[0m",
+                        jp.input.short_hash(),
+                        "-"
+                    ));
+                }
+            })?;
             log::info!(
-                "join: {} nodes, {} OA matched, {} S2 matched",
+                "join: {} nodes, {} OA ({} DOI + {} PMID), {} S2 ({} DOI + {} PMID), {} citations",
                 summary.total_nodes,
                 summary.openalex_matched,
-                summary.s2_matched
+                summary.openalex_doi,
+                summary.openalex_pmid,
+                summary.s2_matched,
+                summary.s2_doi,
+                summary.s2_pmid,
+                summary.citations_exported,
             );
 
             let manifest = store.commit_stage(&join_input, &tmp_dir, false)?;
-            log::info!(
-                "join: committed (content_hash: {})",
-                &manifest.content_hash[..8]
-            );
+            jp.manifest = Some(manifest);
+            jp.status = StageStatus::Cached;
 
-            join_plan = Some(StagePlan {
-                name: StageName::Join,
-                input: join_input,
-                status: StageStatus::Cached,
-                manifest: Some(manifest),
-            });
+            if let Some(ref jl) = join_line {
+                jl.set_message(stage_msg_done(&jp));
+                jl.finish();
+            }
+
+            join_plan = Some(jp);
         }
     }
 
@@ -303,8 +588,14 @@ pub fn run(args: RunArgs, config: &Config) -> Result<()> {
 
     let run_dir = store.create_run(&all_stages)?;
 
-    // 9. Summary
-    print_summary_table(&fetch_plans, join_plan.as_ref(), &run_dir);
+    // 9. Finish stage lines and print run directory
+    for pb in &fetch_lines {
+        pb.finish();
+    }
+    if let Some(ref jl) = join_line {
+        jl.finish();
+    }
+    eprintln!("Run: {}", run_dir.display());
 
     Ok(())
 }
@@ -357,37 +648,6 @@ fn print_plan_table(fetch_plans: &[StagePlan], join_plan: Option<&StagePlan>) {
     eprintln!("\n{table}");
 }
 
-fn print_summary_table(
-    fetch_plans: &[StagePlan],
-    join_plan: Option<&StagePlan>,
-    run_dir: &std::path::Path,
-) {
-    let mut table = Table::new();
-    table
-        .load_preset(UTF8_FULL)
-        .apply_modifier(UTF8_ROUND_CORNERS)
-        .set_header(vec![
-            Cell::new("Stage").fg(Color::Cyan),
-            Cell::new("Input").fg(Color::Cyan),
-            Cell::new("Content").fg(Color::Cyan),
-            Cell::new("Status").fg(Color::Cyan),
-        ]);
-
-    for plan in fetch_plans.iter().chain(join_plan) {
-        if let Some(ref m) = plan.manifest {
-            table.add_row(vec![
-                Cell::new(plan.name),
-                Cell::new(plan.input.short_hash()),
-                Cell::new(&m.content_hash[..8]),
-                plan.status.cell(),
-            ]);
-        }
-    }
-
-    eprintln!("\n{table}");
-    eprintln!("Run: {}", run_dir.display());
-}
-
 fn get_content_hash(plans: &[StagePlan], name: StageName) -> Result<String> {
     plans
         .iter()
@@ -416,6 +676,7 @@ fn run_pubmed(
     config: &Config,
     output_dir: &std::path::Path,
     workers: usize,
+    progress: &SharedProgress,
 ) -> Result<()> {
     let cfg = run_config.pubmed.as_ref().unwrap();
     let pm_config = papeline_pubmed::Config {
@@ -429,7 +690,7 @@ fn run_pubmed(
             .unwrap_or_else(|| config.pubmed.base_url.clone()),
     };
 
-    let summary = papeline_pubmed::run(&pm_config)?;
+    let summary = papeline_pubmed::run(&pm_config, progress.clone())?;
     log::info!(
         "pubmed: {}/{} files, {} articles",
         summary.completed_files,
@@ -447,6 +708,7 @@ fn run_openalex(
     _config: &Config,
     output_dir: &std::path::Path,
     workers: usize,
+    progress: &SharedProgress,
 ) -> Result<()> {
     let cfg = run_config.openalex.as_ref().unwrap();
     let entity = cfg.entity.as_deref().unwrap_or("works");
@@ -479,7 +741,7 @@ fn run_openalex(
         zstd_level: cfg.zstd_level.unwrap_or(run_config.zstd_level),
     };
 
-    let summary = papeline_openalex::run(&oa_config)?;
+    let summary = papeline_openalex::run(&oa_config, progress.clone())?;
     log::info!(
         "openalex: {}/{} shards, {} rows",
         summary.completed_shards,
@@ -498,6 +760,7 @@ fn run_s2(
     output_dir: &std::path::Path,
     workers: usize,
     release_id: &str,
+    progress: &SharedProgress,
 ) -> Result<()> {
     let cfg = run_config.s2.as_ref().unwrap();
     let datasets = cfg.datasets.clone().unwrap_or_else(|| {
@@ -521,8 +784,7 @@ fn run_s2(
     };
 
     let s2_config = papeline_semantic_scholar::Config::try_from(s2_fetch_args)?;
-    let progress = Arc::new(papeline_core::ProgressContext::new());
-    let exit_code = papeline_semantic_scholar::run(&s2_config, progress)?;
+    let exit_code = papeline_semantic_scholar::run(&s2_config, progress.clone())?;
 
     if exit_code != std::process::ExitCode::SUCCESS {
         anyhow::bail!("s2 pipeline failed");

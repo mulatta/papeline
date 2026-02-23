@@ -19,8 +19,7 @@ use crate::{coverage, stats, worker};
 
 /// Main entry point for fetch command
 pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode> {
-    let release_dir = config.output_dir.join(&config.release_id);
-    std::fs::create_dir_all(&release_dir).context("Cannot create output directory")?;
+    std::fs::create_dir_all(&config.output_dir).context("Cannot create output directory")?;
 
     log::info!(
         "s2-dataset-fetcher starting: release={}, workers={}, domains={:?}, datasets={:?}",
@@ -41,7 +40,7 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
         log::info!("URLs refreshed successfully");
     }
 
-    cleanup_tmp_files(&release_dir).context("Failed to clean stale tmp files")?;
+    cleanup_tmp_files(&config.output_dir).context("Failed to clean stale tmp files")?;
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(config.workers)
@@ -64,10 +63,11 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
     if has_papers {
         log::info!("Phase 1: processing papers");
         let paper_urls = load_urls(&config.url_dir, "papers", config.max_shards)?;
-        let (failed, summary) = pool
-            .install(|| worker::process_paper_shards(&paper_urls, &release_dir, config, &progress));
+        let (failed, summary) = pool.install(|| {
+            worker::process_paper_shards(&paper_urls, &config.output_dir, config, &progress)
+        });
         if is_tty {
-            summary.print();
+            progress.println(summary.format_table());
         } else {
             summary.log();
         }
@@ -94,10 +94,15 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
             log::info!("URLs refreshed before Phase 2");
         }
 
-        let (failed, summary) =
-            run_filter_datasets(config, &release_dir, &pool, &filter_datasets, &progress)?;
+        let (failed, summary) = run_filter_datasets(
+            config,
+            &config.output_dir,
+            &pool,
+            &filter_datasets,
+            &progress,
+        )?;
         if is_tty {
-            summary.print();
+            progress.println(summary.format_table());
         } else {
             summary.log();
         }
@@ -116,7 +121,7 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
     if let (Some(paper), Some(filter)) = (paper_summary, filter_summary) {
         let final_summary = stats::FinalSummary { paper, filter };
         if is_tty {
-            final_summary.print();
+            progress.println(final_summary.format_table());
         } else {
             final_summary.log();
         }
@@ -124,10 +129,10 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
 
     // Phase 3: Coverage analysis
     log::info!("Phase 3: analyzing coverage");
-    match coverage::CoverageStats::compute(&release_dir) {
+    match coverage::CoverageStats::compute(&config.output_dir) {
         Ok(cov) => {
             if is_tty {
-                cov.print();
+                progress.println(cov.format_table());
             } else {
                 cov.log();
             }
@@ -135,10 +140,10 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<ExitCode
         Err(e) => log::warn!("Coverage analysis skipped: {e}"),
     }
 
-    match coverage::FieldCompleteness::compute(&release_dir) {
+    match coverage::FieldCompleteness::compute(&config.output_dir) {
         Ok(fields) => {
             if is_tty {
-                fields.print();
+                progress.println(fields.format_table());
             } else {
                 fields.log();
             }
