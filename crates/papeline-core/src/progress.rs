@@ -12,7 +12,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 /// Per-worker progress bar (uv-style: green bar, binary bytes)
 fn bar_style() -> ProgressStyle {
     ProgressStyle::default_bar()
-        .template("{prefix:<20.dim} {bar:30.green/dim} {binary_bytes:>7}/{binary_total_bytes:7} {wide_msg:.dim}")
+        .template("{prefix:<20.dim} {bar:30.green/dim} {binary_bytes:>7}/{binary_total_bytes:7} {eta:>4} {wide_msg:.dim}")
         .expect("invalid template")
         .progress_chars("--")
 }

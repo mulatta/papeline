@@ -27,7 +27,7 @@ pub fn process_file(
     pb: ProgressBar,
     rows_counter: &AtomicUsize,
 ) -> Result<usize> {
-    pb.set_message(entry.filename.clone());
+    pb.set_message("connecting...");
 
     // Download with semaphore — permit released after download so other
     // workers can start downloading while this one parses XML on CPU.
@@ -45,7 +45,7 @@ pub fn process_file(
                     attempt + 1
                 );
                 std::thread::sleep(delay);
-                pb.set_message(format!("{} (retry {})", entry.filename, attempt + 1));
+                pb.set_message(format!("retry {}/{max_retries}...", attempt + 1));
             }
 
             let _permit = papeline_core::acquire_download_permit();
