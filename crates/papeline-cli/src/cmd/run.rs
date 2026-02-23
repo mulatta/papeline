@@ -445,44 +445,88 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
         pb
     });
 
-    // 6. Execute fetch stages that need running
-    for (i, plan) in fetch_plans.iter_mut().enumerate() {
-        if plan.status == StageStatus::Cached {
-            continue;
-        }
+    // 6. Execute fetch stages in parallel
+    let run_indices: Vec<usize> = fetch_plans
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.status != StageStatus::Cached)
+        .map(|(i, _)| i)
+        .collect();
 
+    for &i in &run_indices {
         fetch_lines[i].enable_steady_tick(std::time::Duration::from_millis(80));
-        fetch_lines[i].set_message(stage_msg_running(plan));
+        fetch_lines[i].set_message(stage_msg_running(&fetch_plans[i]));
+    }
 
-        let tmp_dir = store.stage_tmp_dir(&plan.input);
+    if !run_indices.is_empty() {
+        // Rebind as shared refs so move closures capture references, not owned values
+        let store_ref = &store;
+        let rc_ref = &run_config;
+        let s2_ref = &s2_release_id;
 
-        // Clean stale tmp
-        if tmp_dir.exists() {
-            std::fs::remove_dir_all(&tmp_dir)?;
+        let results: Vec<Result<(usize, StageManifest)>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = run_indices
+                .iter()
+                .map(|&i| {
+                    let plan = &fetch_plans[i];
+                    let pb = fetch_lines[i].clone();
+                    let tmp_dir = store_ref.stage_tmp_dir(&plan.input);
+
+                    scope.spawn(move || -> Result<(usize, StageManifest)> {
+                        if tmp_dir.exists() {
+                            std::fs::remove_dir_all(&tmp_dir)?;
+                        }
+                        std::fs::create_dir_all(&tmp_dir)?;
+
+                        match plan.name {
+                            StageName::Pubmed => {
+                                run_pubmed(rc_ref, config, &tmp_dir, workers, progress)?;
+                            }
+                            StageName::Openalex => {
+                                run_openalex(rc_ref, config, &tmp_dir, workers, progress)?;
+                            }
+                            StageName::S2 => {
+                                let release_id = s2_ref.as_deref().unwrap();
+                                run_s2(rc_ref, config, &tmp_dir, workers, release_id, progress)?;
+                            }
+                            StageName::Join => unreachable!("join handled separately"),
+                        }
+
+                        let manifest = store_ref.commit_stage(&plan.input, &tmp_dir, false)?;
+
+                        let ih = plan.input.short_hash();
+                        let ch = &manifest.content_hash[..8];
+                        pb.set_message(format!("{ih:<10} {ch:<10} \x1b[32mcached\x1b[0m"));
+                        pb.finish();
+
+                        Ok((i, manifest))
+                    })
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("stage thread panicked"))
+                .collect()
+        });
+
+        let mut first_error: Option<anyhow::Error> = None;
+        for result in results {
+            match result {
+                Ok((i, manifest)) => {
+                    fetch_plans[i].manifest = Some(manifest);
+                    fetch_plans[i].status = StageStatus::Cached;
+                }
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+            }
         }
-        std::fs::create_dir_all(&tmp_dir)?;
-
-        match plan.name {
-            StageName::Pubmed => {
-                run_pubmed(&run_config, config, &tmp_dir, workers, progress)?;
-            }
-            StageName::Openalex => {
-                run_openalex(&run_config, config, &tmp_dir, workers, progress)?;
-            }
-            StageName::S2 => {
-                let release_id = s2_release_id.as_ref().unwrap();
-                run_s2(&run_config, config, &tmp_dir, workers, release_id, progress)?;
-            }
-            StageName::Join => unreachable!("join handled separately"),
+        if let Some(e) = first_error {
+            return Err(e);
         }
-
-        let recursive = false;
-        let manifest = store.commit_stage(&plan.input, &tmp_dir, recursive)?;
-        plan.manifest = Some(manifest);
-        plan.status = StageStatus::Cached;
-
-        fetch_lines[i].set_message(stage_msg_done(plan));
-        fetch_lines[i].finish();
     }
 
     // 7. Join stage (recompute hash now that all fetches are done)
