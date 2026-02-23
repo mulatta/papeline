@@ -3,4 +3,4 @@ result
 result-*
 target/
 .cache/
-outputs/*
+data/*

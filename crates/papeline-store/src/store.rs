@@ -495,6 +495,344 @@ mod tests {
         assert!(!store.stage_dir(&input).exists());
     }
 
+    fn commit_input(store: &Store, input: &StageInput, data: &[u8]) -> StageManifest {
+        let tmp = store.stage_tmp_dir(input);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("data.parquet"), data).unwrap();
+        store.commit_stage(input, &tmp, false).unwrap()
+    }
+
+    fn make_input(base_url: &str) -> StageInput {
+        let cfg = PubmedInput {
+            base_url: base_url.into(),
+            max_files: Some(5),
+            zstd_level: 3,
+        };
+        make_stage_input(StageName::Pubmed, &cfg)
+    }
+
+    fn make_oa_input() -> StageInput {
+        use crate::stage::OpenAlexInput;
+        let cfg = OpenAlexInput {
+            entity: "works".into(),
+            since: None,
+            max_shards: None,
+            zstd_level: 3,
+        };
+        make_stage_input(StageName::Openalex, &cfg)
+    }
+
+    fn make_s2_input_for_test() -> StageInput {
+        use crate::stage::S2Input;
+        let cfg = S2Input {
+            release_id: "2025-01-01".into(),
+            datasets: vec!["papers".into()],
+            domains: vec!["Biology".into()],
+            max_shards: None,
+            zstd_level: 3,
+        };
+        make_stage_input(StageName::S2, &cfg)
+    }
+
+    #[test]
+    fn create_run_produces_symlinks_and_run_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let input = test_input();
+        let manifest = commit_input(&store, &input, b"pm_data");
+
+        let run_dir = store
+            .create_run(&[(StageName::Pubmed, &input, &manifest, false)])
+            .unwrap();
+
+        // run.json exists
+        let run_json = run_dir.join("run.json");
+        assert!(run_json.exists());
+        let meta: RunMeta = serde_json::from_str(&fs::read_to_string(&run_json).unwrap()).unwrap();
+        assert_eq!(meta.stages.len(), 1);
+        assert!(meta.stages.contains_key("pubmed"));
+        assert!(!meta.stages["pubmed"].cached);
+
+        // Symlink exists and resolves
+        let link = run_dir.join("pubmed");
+        assert!(link.is_symlink());
+        assert!(fs::read_dir(&link).is_ok());
+    }
+
+    #[test]
+    fn create_run_updates_latest_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let input = test_input();
+        let manifest = commit_input(&store, &input, b"data");
+
+        let run_dir = store
+            .create_run(&[(StageName::Pubmed, &input, &manifest, true)])
+            .unwrap();
+
+        let latest = dir.path().join("latest");
+        assert!(latest.is_symlink());
+        // latest should resolve to the same run
+        let latest_resolved = fs::canonicalize(&latest).unwrap();
+        let run_resolved = fs::canonicalize(&run_dir).unwrap();
+        assert_eq!(latest_resolved, run_resolved);
+    }
+
+    #[test]
+    fn create_run_with_multiple_stages() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let pm_input = test_input();
+        let pm_manifest = commit_input(&store, &pm_input, b"pm");
+
+        let oa_input = make_oa_input();
+        let oa_manifest = commit_input(&store, &oa_input, b"oa");
+
+        let run_dir = store
+            .create_run(&[
+                (StageName::Pubmed, &pm_input, &pm_manifest, true),
+                (StageName::Openalex, &oa_input, &oa_manifest, false),
+            ])
+            .unwrap();
+
+        assert!(run_dir.join("pubmed").is_symlink());
+        assert!(run_dir.join("openalex").is_symlink());
+
+        let meta: RunMeta =
+            serde_json::from_str(&fs::read_to_string(run_dir.join("run.json")).unwrap()).unwrap();
+        assert_eq!(meta.stages.len(), 2);
+        assert!(meta.stages["pubmed"].cached);
+        assert!(!meta.stages["openalex"].cached);
+    }
+
+    #[test]
+    fn list_returns_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let input1 = make_input("https://a.com");
+        let manifest1 = commit_input(&store, &input1, b"data_a");
+
+        let input2 = make_input("https://b.com");
+        let _manifest2 = commit_input(&store, &input2, b"data_b");
+
+        // Create a run referencing only input1
+        store
+            .create_run(&[(StageName::Pubmed, &input1, &manifest1, false)])
+            .unwrap();
+
+        let entries = store.list().unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let ref_entry = entries
+            .iter()
+            .find(|e| e.input_hash == input1.short_hash())
+            .unwrap();
+        assert!(ref_entry.referenced);
+
+        let unref_entry = entries
+            .iter()
+            .find(|e| e.input_hash == input2.short_hash())
+            .unwrap();
+        assert!(!unref_entry.referenced);
+
+        // Both should have correct file count
+        for e in &entries {
+            assert_eq!(e.file_count, 1);
+        }
+    }
+
+    #[test]
+    fn list_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let entries = store.list().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn list_skips_tmp_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        // Create a .tmp dir
+        let tmp = store.store_dir().join("abcd1234.tmp");
+        fs::create_dir_all(&tmp).unwrap();
+
+        let entries = store.list().unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn gc_preserves_referenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let input = test_input();
+        let manifest = commit_input(&store, &input, b"keep");
+
+        // Create run → now it's referenced
+        store
+            .create_run(&[(StageName::Pubmed, &input, &manifest, false)])
+            .unwrap();
+
+        let removed = store.gc().unwrap();
+        assert!(removed.is_empty());
+        assert!(store.stage_dir(&input).exists());
+    }
+
+    #[test]
+    fn gc_cleans_tmp_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let tmp = store.store_dir().join("deadbeef.tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("junk"), b"stale").unwrap();
+
+        let removed = store.gc().unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].ends_with(".tmp"));
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn verify_all_multiple_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let input1 = make_input("https://a.com");
+        commit_input(&store, &input1, b"ok_data");
+
+        let input2 = make_input("https://b.com");
+        commit_input(&store, &input2, b"will_corrupt");
+
+        // Corrupt second entry
+        let corrupt_path = store.stage_dir(&input2).join("data.parquet");
+        fs::write(&corrupt_path, b"bad").unwrap();
+
+        let all = store.verify_all().unwrap();
+        assert_eq!(all.len(), 2);
+
+        let r1 = &all[&input1.short_hash()];
+        assert!(r1.iter().all(|r| r.ok));
+
+        let r2 = &all[&input2.short_hash()];
+        assert!(r2.iter().any(|r| !r.ok));
+    }
+
+    #[test]
+    fn verify_all_skips_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let tmp = store.store_dir().join("deadbeef.tmp");
+        fs::create_dir_all(&tmp).unwrap();
+
+        let all = store.verify_all().unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn verify_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let input = test_input();
+        commit_input(&store, &input, b"data");
+
+        // Delete the data file but keep manifest
+        let data_path = store.stage_dir(&input).join("data.parquet");
+        fs::remove_file(&data_path).unwrap();
+
+        let results = store.verify(&input.short_hash()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].ok);
+        assert_eq!(results[0].actual, "MISSING");
+    }
+
+    #[test]
+    fn cleanup_tmp_removes_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        fs::create_dir_all(store.store_dir().join("aaa.tmp")).unwrap();
+        fs::create_dir_all(store.store_dir().join("bbb.tmp")).unwrap();
+
+        let count = store.cleanup_tmp().unwrap();
+        assert_eq!(count, 2);
+        assert!(!store.store_dir().join("aaa.tmp").exists());
+        assert!(!store.store_dir().join("bbb.tmp").exists());
+    }
+
+    #[test]
+    fn cleanup_tmp_ignores_real_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let input = test_input();
+        commit_input(&store, &input, b"real");
+
+        let count = store.cleanup_tmp().unwrap();
+        assert_eq!(count, 0);
+        assert!(store.stage_dir(&input).exists());
+    }
+
+    #[test]
+    fn commit_recursive_s2_structure() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+
+        let input = make_s2_input_for_test();
+        let tmp = store.stage_tmp_dir(&input);
+        let sub = tmp.join("2025-01-01");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("papers_0000.parquet"), b"papers").unwrap();
+        fs::write(sub.join("corpus_ids.bin"), b"ids").unwrap();
+
+        let manifest = store.commit_stage(&input, &tmp, true).unwrap();
+        assert_eq!(manifest.file_hashes.len(), 2);
+        assert!(
+            manifest
+                .file_hashes
+                .contains_key("2025-01-01/papers_0000.parquet")
+        );
+        assert!(
+            manifest
+                .file_hashes
+                .contains_key("2025-01-01/corpus_ids.bin")
+        );
+    }
+
+    #[test]
+    fn commit_duplicate_hash_concurrent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path()).unwrap();
+        let input = test_input();
+
+        // First commit
+        let tmp1 = store.stage_tmp_dir(&input);
+        fs::create_dir_all(&tmp1).unwrap();
+        fs::write(tmp1.join("data.parquet"), b"data").unwrap();
+        store.commit_stage(&input, &tmp1, false).unwrap();
+
+        // Second commit with same input hash (simulates concurrent)
+        let tmp2 = store
+            .store_dir()
+            .join(format!("{}.tmp", input.short_hash()));
+        fs::create_dir_all(&tmp2).unwrap();
+        fs::write(tmp2.join("data.parquet"), b"data").unwrap();
+        let manifest2 = store.commit_stage(&input, &tmp2, false).unwrap();
+
+        // tmp should be cleaned up, final dir should still exist
+        assert!(!tmp2.exists());
+        assert!(store.stage_dir(&input).exists());
+        assert!(!manifest2.content_hash.is_empty());
+    }
+
     #[test]
     fn verify_detects_corruption() {
         let dir = tempfile::tempdir().unwrap();

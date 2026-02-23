@@ -316,6 +316,329 @@ datasets = ["citations", "papers"]
     }
 
     #[test]
+    fn from_file_reads_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.toml");
+        std::fs::write(
+            &path,
+            r#"
+output = "./out"
+[pubmed]
+limit = 3
+"#,
+        )
+        .unwrap();
+        let config = RunConfig::from_file(&path).unwrap();
+        assert_eq!(config.output, PathBuf::from("./out"));
+        assert_eq!(config.pubmed.as_ref().unwrap().limit, Some(3));
+    }
+
+    #[test]
+    fn from_file_missing() {
+        let err = RunConfig::from_file(std::path::Path::new("/nonexistent/run.toml"));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn from_file_invalid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "{{invalid toml").unwrap();
+        let err = RunConfig::from_file(&path);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn active_fetch_stages_all() {
+        let toml = r#"
+[pubmed]
+[openalex]
+[s2]
+domains = ["Biology"]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let stages = config.active_fetch_stages();
+        assert_eq!(stages.len(), 3);
+        assert_eq!(stages[0], StageName::Pubmed);
+        assert_eq!(stages[1], StageName::Openalex);
+        assert_eq!(stages[2], StageName::S2);
+    }
+
+    #[test]
+    fn active_fetch_stages_none() {
+        let toml = r#"
+output = "./data"
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert!(config.active_fetch_stages().is_empty());
+    }
+
+    #[test]
+    fn active_fetch_stages_partial() {
+        let toml = r#"
+[openalex]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let stages = config.active_fetch_stages();
+        assert_eq!(stages.len(), 1);
+        assert_eq!(stages[0], StageName::Openalex);
+    }
+
+    #[test]
+    fn openalex_input_defaults() {
+        let toml = r#"
+[openalex]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let defaults = Defaults::default();
+        let si = config.openalex_input(&defaults).unwrap();
+        // Default entity is "works"
+        assert!(si.config_json.contains(r#""entity":"works""#));
+        // Default zstd_level is 3
+        assert!(si.config_json.contains(r#""zstd_level":3"#));
+        // No since
+        assert!(si.config_json.contains(r#""since":null"#));
+    }
+
+    #[test]
+    fn openalex_input_with_overrides() {
+        let toml = r#"
+[openalex]
+entity = "authors"
+since = "2024-06-01"
+limit = 10
+zstd_level = 7
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let defaults = Defaults::default();
+        let si = config.openalex_input(&defaults).unwrap();
+        assert!(si.config_json.contains(r#""entity":"authors""#));
+        assert!(si.config_json.contains(r#""since":"2024-06-01""#));
+        assert!(si.config_json.contains(r#""max_shards":10"#));
+        assert!(si.config_json.contains(r#""zstd_level":7"#));
+    }
+
+    #[test]
+    fn join_input_deterministic() {
+        let toml = r#"
+[pubmed]
+[openalex]
+[s2]
+domains = ["Biology"]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let si1 = config.join_input("aaa", "bbb", "ccc").unwrap();
+        let si2 = config.join_input("aaa", "bbb", "ccc").unwrap();
+        assert_eq!(si1.input_hash(), si2.input_hash());
+    }
+
+    #[test]
+    fn join_input_changes_with_upstream() {
+        let toml = r#"
+[pubmed]
+[openalex]
+[s2]
+domains = ["Biology"]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let si1 = config.join_input("aaa", "bbb", "ccc").unwrap();
+        let si2 = config.join_input("aaa", "bbb", "ddd").unwrap();
+        assert_ne!(si1.input_hash(), si2.input_hash());
+    }
+
+    #[test]
+    fn join_input_none_when_no_join() {
+        let toml = r#"
+[pubmed]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert!(config.join_input("a", "b", "c").is_none());
+    }
+
+    #[test]
+    fn s2_release_defaults_to_latest() {
+        let toml = r#"
+[s2]
+domains = ["Biology"]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.s2_release(), Some("latest".into()));
+    }
+
+    #[test]
+    fn s2_release_explicit() {
+        let toml = r#"
+[s2]
+domains = ["Biology"]
+release = "2025-01-14"
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.s2_release(), Some("2025-01-14".into()));
+    }
+
+    #[test]
+    fn s2_release_none_when_no_s2() {
+        let toml = r#"
+[pubmed]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert!(config.s2_release().is_none());
+    }
+
+    #[test]
+    fn join_memory_limit_default() {
+        let toml = r#"
+[pubmed]
+[openalex]
+[s2]
+domains = ["Biology"]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.join_memory_limit(), "8GB");
+    }
+
+    #[test]
+    fn join_memory_limit_override() {
+        let toml = r#"
+[pubmed]
+[openalex]
+[s2]
+domains = ["Biology"]
+[join]
+memory_limit = "32GB"
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.join_memory_limit(), "32GB");
+    }
+
+    #[test]
+    fn pubmed_input_uses_defaults() {
+        let toml = r#"
+[pubmed]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let defaults = Defaults::default();
+        let si = config.pubmed_input(&defaults).unwrap();
+        assert!(si.config_json.contains(&defaults.pubmed_base_url));
+        assert!(si.config_json.contains(r#""zstd_level":3"#));
+    }
+
+    #[test]
+    fn pubmed_input_none_when_absent() {
+        let toml = r#"
+[openalex]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let defaults = Defaults::default();
+        assert!(config.pubmed_input(&defaults).is_none());
+    }
+
+    #[test]
+    fn s2_input_none_when_absent() {
+        let toml = r#"
+[pubmed]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert!(config.s2_input("2025-01-01").is_none());
+    }
+
+    #[test]
+    fn s2_input_default_datasets() {
+        let toml = r#"
+[s2]
+domains = ["Biology"]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let si = config.s2_input("2025-01-01").unwrap();
+        // Default datasets: abstracts, citations, papers, tldrs (sorted)
+        assert!(
+            si.config_json
+                .contains(r#""datasets":["abstracts","citations","papers","tldrs"]"#)
+        );
+    }
+
+    #[test]
+    fn validate_ok_all_sources() {
+        let toml = r#"
+[pubmed]
+[openalex]
+[s2]
+domains = ["Biology"]
+[join]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_ok_no_join() {
+        let toml = r#"
+[pubmed]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn should_join_auto_with_all_three() {
+        let toml = r#"
+[pubmed]
+[openalex]
+[s2]
+domains = ["Biology"]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert!(config.should_join());
+    }
+
+    #[test]
+    fn should_join_explicit_with_all_three() {
+        let toml = r#"
+[pubmed]
+[openalex]
+[s2]
+domains = ["Biology"]
+[join]
+memory_limit = "4GB"
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert!(config.should_join());
+    }
+
+    #[test]
+    fn should_not_join_two_sources() {
+        let toml = r#"
+[pubmed]
+[openalex]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert!(!config.should_join());
+    }
+
+    #[test]
+    fn zstd_global_default() {
+        let toml = r#"
+[pubmed]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        assert_eq!(config.zstd_level, 3); // default_zstd_level
+    }
+
+    #[test]
+    fn zstd_global_override() {
+        let toml = r#"
+zstd_level = 10
+
+[pubmed]
+"#;
+        let config: RunConfig = toml::from_str(toml).unwrap();
+        let defaults = Defaults::default();
+        let si = config.pubmed_input(&defaults).unwrap();
+        // No stage-level override → uses global
+        assert!(si.config_json.contains(r#""zstd_level":10"#));
+    }
+
+    #[test]
     fn effective_zstd_fallback() {
         let toml = r#"
 zstd_level = 5

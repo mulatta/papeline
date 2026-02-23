@@ -162,6 +162,95 @@ mod tests {
     }
 
     #[test]
+    fn recursive_hashes_with_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("2025-01-01");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("papers_0000.parquet"), b"papers").unwrap();
+        std::fs::write(sub.join("citations_0000.parquet"), b"citations").unwrap();
+        // File at root level too
+        std::fs::write(dir.path().join("corpus_ids.bin"), b"ids").unwrap();
+
+        let (hashes, _) = StageManifest::compute_content_hashes_recursive(dir.path()).unwrap();
+        assert_eq!(hashes.len(), 3);
+        // Keys should be relative paths with subdirectory
+        assert!(hashes.contains_key("2025-01-01/papers_0000.parquet"));
+        assert!(hashes.contains_key("2025-01-01/citations_0000.parquet"));
+        assert!(hashes.contains_key("corpus_ids.bin"));
+    }
+
+    #[test]
+    fn recursive_hashes_empty_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("empty_sub")).unwrap();
+
+        let (hashes, combined) =
+            StageManifest::compute_content_hashes_recursive(dir.path()).unwrap();
+        assert!(hashes.is_empty());
+        // Empty should produce the "empty" sentinel hash
+        let expected = crate::hash::hash_bytes(b"empty");
+        assert_eq!(combined, expected);
+    }
+
+    #[test]
+    fn recursive_excludes_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("data.parquet"), b"data").unwrap();
+        std::fs::write(dir.path().join("manifest.json"), b"{}").unwrap();
+
+        let (hashes, _) = StageManifest::compute_content_hashes_recursive(dir.path()).unwrap();
+        assert_eq!(hashes.len(), 1);
+        assert!(
+            !hashes
+                .values()
+                .any(|_| hashes.contains_key("manifest.json"))
+        );
+    }
+
+    #[test]
+    fn recursive_deterministic_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub_a = dir.path().join("a");
+        let sub_b = dir.path().join("b");
+        std::fs::create_dir_all(&sub_a).unwrap();
+        std::fs::create_dir_all(&sub_b).unwrap();
+        std::fs::write(sub_b.join("z.parquet"), b"z").unwrap();
+        std::fs::write(sub_a.join("a.parquet"), b"a").unwrap();
+
+        let (_, hash1) = StageManifest::compute_content_hashes_recursive(dir.path()).unwrap();
+        let (_, hash2) = StageManifest::compute_content_hashes_recursive(dir.path()).unwrap();
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn content_hash_deterministic() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.parquet"), b"data_a").unwrap();
+        std::fs::write(dir.path().join("b.parquet"), b"data_b").unwrap();
+
+        let (_, h1) = StageManifest::compute_content_hashes(dir.path()).unwrap();
+        let (_, h2) = StageManifest::compute_content_hashes(dir.path()).unwrap();
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn read_from_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = StageManifest::read_from(dir.path());
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn read_from_corrupt_json() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("manifest.json"), b"not valid json").unwrap();
+        let err = StageManifest::read_from(dir.path());
+        assert!(err.is_err());
+    }
+
+    #[test]
     fn manifest_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
 
