@@ -7,3 +7,4 @@ data/*
 perf.data*
 flamegraph.svg
 profile.json*
+stacks.folded

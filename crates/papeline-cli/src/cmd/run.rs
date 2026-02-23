@@ -605,7 +605,7 @@ pub fn run(args: RunArgs, config: &Config, progress: &SharedProgress) -> Result<
             let summary = papeline_join::run_with_progress(&join_config, |step, desc| {
                 if let Some(jl) = jl_ref {
                     jl.set_message(format!(
-                        "{:<10} {:<10} \x1b[33mstep {step}/8: {desc}\x1b[0m",
+                        "{:<10} {:<10} \x1b[33mstep {step}/9: {desc}\x1b[0m",
                         jp.input.short_hash(),
                         "-"
                     ));

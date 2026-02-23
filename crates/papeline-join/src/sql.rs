@@ -1,9 +1,9 @@
 //! SQL generation for the multi-source join pipeline.
 //!
 //! Strategy:
-//! - OA: 2-pass hash join (DOI then PMID fallback)
-//! - S2: Narrow key tables (DOI/PMID only) → match → enrich via integer key joins
-//! - This avoids materializing full S2 papers (22 cols) in hash tables
+//! - All DOI/PMID keys pre-materialized into narrow temp tables → hash join guaranteed
+//! - OA: 2-pass join (DOI then PMID fallback) via key tables → enrich via string key
+//! - S2: 2-pass join (DOI then PMID fallback) via key tables → enrich via integer key
 
 use std::path::Path;
 
@@ -99,10 +99,80 @@ fn s2_view_or_empty(s2_dir: &Path, pattern: &str, view_name: &str, cols_ddl: &st
     }
 }
 
-// ── OA columns selected in pass 1 (pm.* + these OA columns) ──
+/// Pass 1: Join PubMed with OpenAlex on DOI (via narrow key table → hash join).
+pub fn join_pubmed_openalex_pass1() -> &'static str {
+    "CREATE OR REPLACE TEMP TABLE pm_oa_pass1 AS
+     SELECT
+       pm.*,
+       oak.openalex_id
+     FROM v_pubmed pm
+     LEFT JOIN oa_doi_keys oak
+       ON normalize_doi(pm.doi) = oak.doi_norm
+       AND pm.doi IS NOT NULL
+       AND pm.doi != ''"
+}
 
-const OA_COLS: &str = "\
-       oa.id AS openalex_id,
+/// Pass 2: For rows unmatched by DOI, try PMID (via narrow key table → hash join).
+/// Then UNION ALL with the already-matched rows.
+pub fn join_pubmed_openalex_pass2() -> &'static str {
+    "CREATE OR REPLACE TEMP TABLE pm_oa AS
+     -- Already matched by DOI
+     SELECT * FROM pm_oa_pass1 WHERE openalex_id IS NOT NULL
+     UNION ALL
+     -- Unmatched: try PMID
+     SELECT
+       p1.* EXCLUDE (openalex_id),
+       oak.openalex_id
+     FROM pm_oa_pass1 p1
+     LEFT JOIN oa_pmid_keys oak
+       ON CAST(p1.pmid AS VARCHAR) = oak.pmid
+       AND p1.pmid IS NOT NULL
+     WHERE p1.openalex_id IS NULL"
+}
+
+// ── Narrow Key Tables ──
+
+/// Create narrow key tables for all DOI/PMID matching.
+/// Pre-materializing normalized keys ensures hash join instead of NLJ.
+pub fn create_key_tables() -> &'static str {
+    "CREATE TEMP TABLE oa_doi_keys AS
+     SELECT id AS openalex_id, normalize_doi(doi) AS doi_norm
+     FROM v_openalex
+     WHERE doi IS NOT NULL AND doi != ''
+     QUALIFY ROW_NUMBER() OVER (
+       PARTITION BY normalize_doi(doi) ORDER BY cited_by_count DESC
+     ) = 1;
+
+     CREATE TEMP TABLE oa_pmid_keys AS
+     SELECT id AS openalex_id, pmid
+     FROM v_openalex
+     WHERE pmid IS NOT NULL AND pmid != ''
+     QUALIFY ROW_NUMBER() OVER (
+       PARTITION BY pmid ORDER BY cited_by_count DESC
+     ) = 1;
+
+     CREATE TEMP TABLE s2_doi_keys AS
+     SELECT corpusid, normalize_doi(doi) AS doi_norm
+     FROM v_s2_papers
+     WHERE doi IS NOT NULL AND doi != ''
+     QUALIFY ROW_NUMBER() OVER (
+       PARTITION BY normalize_doi(doi) ORDER BY citationcount DESC
+     ) = 1;
+
+     CREATE TEMP TABLE s2_pmid_keys AS
+     SELECT corpusid, pubmed
+     FROM v_s2_papers
+     WHERE pubmed IS NOT NULL AND pubmed != ''
+     QUALIFY ROW_NUMBER() OVER (
+       PARTITION BY pubmed ORDER BY citationcount DESC
+     ) = 1"
+}
+
+/// Enrich pm_oa with full OpenAlex metadata via string key join (hash join guaranteed).
+pub fn enrich_openalex() -> &'static str {
+    "CREATE OR REPLACE TEMP TABLE pm_oa_enriched AS
+     SELECT
+       po.*,
        oa.cited_by_count AS oa_cited_by_count,
        oa.referenced_works_count AS oa_referenced_works_count,
        oa.is_oa,
@@ -122,112 +192,9 @@ const OA_COLS: &str = "\
        oa.source_type AS oa_source_type,
        oa.mag AS oa_mag,
        oa.created_date AS oa_created_date,
-       oa.updated_date AS oa_updated_date";
-
-/// Pass 1: Join PubMed with OpenAlex on DOI.
-pub fn join_pubmed_openalex_pass1() -> String {
-    format!(
-        "CREATE OR REPLACE TEMP TABLE pm_oa_pass1 AS
-     SELECT
-       pm.*,
-       {OA_COLS}
-     FROM v_pubmed pm
-     LEFT JOIN (
-       SELECT *
-       FROM v_openalex
-       WHERE doi IS NOT NULL AND doi != ''
-       QUALIFY ROW_NUMBER() OVER (
-         PARTITION BY normalize_doi(doi) ORDER BY cited_by_count DESC
-       ) = 1
-     ) oa
-       ON normalize_doi(pm.doi) = normalize_doi(oa.doi)
-       AND pm.doi IS NOT NULL
-       AND pm.doi != ''"
-    )
-}
-
-// OA columns for the UNION ALL pass2 (explicit select, prefixed with alias)
-const OA_COLS_ALIASED_PASS2: &str = "\
-       oa2.id AS openalex_id,
-       oa2.cited_by_count AS oa_cited_by_count,
-       oa2.referenced_works_count AS oa_referenced_works_count,
-       oa2.is_oa,
-       oa2.oa_status,
-       oa2.type AS oa_work_type,
-       oa2.primary_topic_id,
-       oa2.primary_topic_display_name,
-       oa2.abstract_text AS oa_abstract,
-       oa2.publication_date AS oa_publication_date,
-       oa2.publication_year AS oa_publication_year,
-       oa2.language AS oa_language,
-       oa2.display_name AS oa_display_name,
-       oa2.author_ids AS oa_author_ids,
-       oa2.institution_ids AS oa_institution_ids,
-       oa2.source_id AS oa_source_id,
-       oa2.source_display_name AS oa_source_display_name,
-       oa2.source_type AS oa_source_type,
-       oa2.mag AS oa_mag,
-       oa2.created_date AS oa_created_date,
-       oa2.updated_date AS oa_updated_date";
-
-/// Pass 2: For rows unmatched by DOI, try PMID.
-/// Then UNION ALL with the already-matched rows.
-pub fn join_pubmed_openalex_pass2() -> String {
-    format!(
-        "CREATE OR REPLACE TEMP TABLE pm_oa AS
-     -- Already matched by DOI
-     SELECT * FROM pm_oa_pass1 WHERE openalex_id IS NOT NULL
-     UNION ALL
-     -- Unmatched: try PMID
-     SELECT
-       p1.pmid, p1.doi, p1.pmc_id, p1.pii,
-       p1.title, p1.vernacular_title, p1.abstract_text,
-       p1.language, p1.publication_status,
-       p1.journal_title, p1.journal_iso, p1.journal_issn,
-       p1.journal_volume, p1.journal_issue, p1.pagination, p1.elocation_id,
-       p1.pub_year, p1.pub_month, p1.pub_day,
-       p1.date_completed, p1.date_revised,
-       p1.authors_json, p1.affiliations_json, p1.collective_name,
-       p1.mesh_terms_json, p1.mesh_major_topics, p1.chemicals_json,
-       p1.grants_json, p1.publication_types, p1.keywords,
-       p1.databanks_json, p1.reference_count,
-       p1.coi_statement, p1.copyright_info,
-       {OA_COLS_ALIASED_PASS2}
-     FROM pm_oa_pass1 p1
-     LEFT JOIN (
-       SELECT *
-       FROM v_openalex
-       WHERE pmid IS NOT NULL AND pmid != ''
-       QUALIFY ROW_NUMBER() OVER (
-         PARTITION BY pmid ORDER BY cited_by_count DESC
-       ) = 1
-     ) oa2
-       ON CAST(p1.pmid AS VARCHAR) = oa2.pmid
-       AND p1.pmid IS NOT NULL
-     WHERE p1.openalex_id IS NULL"
-    )
-}
-
-// ── S2 Narrow Key Tables ──
-
-/// Create narrow S2 key tables for DOI and PMID matching.
-/// Hash table size: ~30MB instead of ~350MB (full 22 cols).
-pub fn create_s2_key_tables() -> &'static str {
-    "CREATE TEMP TABLE s2_doi_keys AS
-     SELECT corpusid, normalize_doi(doi) AS doi_norm
-     FROM v_s2_papers
-     WHERE doi IS NOT NULL AND doi != ''
-     QUALIFY ROW_NUMBER() OVER (
-       PARTITION BY normalize_doi(doi) ORDER BY citationcount DESC
-     ) = 1;
-
-     CREATE TEMP TABLE s2_pmid_keys AS
-     SELECT corpusid, pubmed
-     FROM v_s2_papers
-     WHERE pubmed IS NOT NULL AND pubmed != ''
-     QUALIFY ROW_NUMBER() OVER (
-       PARTITION BY pubmed ORDER BY citationcount DESC
-     ) = 1"
+       oa.updated_date AS oa_updated_date
+     FROM pm_oa po
+     LEFT JOIN v_openalex oa ON po.openalex_id = oa.id"
 }
 
 /// Pass 3: Join PubMed+OA with S2 on DOI (using narrow key table).
@@ -236,7 +203,7 @@ pub fn join_s2_doi() -> &'static str {
      SELECT
        po.*,
        s2k.corpusid AS s2_corpusid
-     FROM pm_oa po
+     FROM pm_oa_enriched po
      LEFT JOIN s2_doi_keys s2k
        ON normalize_doi(po.doi) = s2k.doi_norm
        AND po.doi IS NOT NULL

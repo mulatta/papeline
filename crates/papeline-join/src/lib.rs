@@ -40,8 +40,8 @@ pub fn run(config: &JoinConfig) -> Result<JoinSummary> {
 
 /// Run the join pipeline with a step progress callback.
 ///
-/// `on_step(current, description)` is called before each of the 8 steps
-/// (1-indexed, total=8).
+/// `on_step(current, description)` is called before each of the 9 steps
+/// (1-indexed, total=9).
 pub fn run_with_progress(
     config: &JoinConfig,
     on_step: impl Fn(usize, &str),
@@ -80,27 +80,32 @@ pub fn run_with_progress(
             .with_context(|| format!("Failed to create view: {stmt}"))?;
     }
 
-    // Step 1: PubMed + OpenAlex (DOI match)
-    on_step(1, "PubMed + OpenAlex (DOI)");
-    conn.execute_batch(&sql::join_pubmed_openalex_pass1())
+    // Step 1: Narrow key tables (OA + S2)
+    on_step(1, "Key tables");
+    conn.execute_batch(sql::create_key_tables())
+        .context("Failed: key tables")?;
+
+    // Step 2: PubMed + OpenAlex (DOI match via key table)
+    on_step(2, "PubMed + OpenAlex (DOI)");
+    conn.execute_batch(sql::join_pubmed_openalex_pass1())
         .context("Failed: PubMed+OA DOI join")?;
 
     let oa_doi: u64 = conn
         .query_row(sql::count_oa_doi(), [], |row| row.get::<_, i64>(0))
         .context("Failed to count OA DOI matches")? as u64;
 
-    // Step 2: PubMed + OpenAlex (PMID fallback)
-    on_step(2, "PubMed + OpenAlex (PMID)");
-    conn.execute_batch(&sql::join_pubmed_openalex_pass2())
+    // Step 3: PubMed + OpenAlex (PMID fallback via key table)
+    on_step(3, "PubMed + OpenAlex (PMID)");
+    conn.execute_batch(sql::join_pubmed_openalex_pass2())
         .context("Failed: PubMed+OA PMID fallback join")?;
 
-    // Step 3: S2 key tables (narrow)
-    on_step(3, "S2 key tables");
-    conn.execute_batch(sql::create_s2_key_tables())
-        .context("Failed: S2 key tables")?;
+    // Step 4: OpenAlex enrich (string key join)
+    on_step(4, "OpenAlex enrich");
+    conn.execute_batch(sql::enrich_openalex())
+        .context("Failed: OA enrichment")?;
 
-    // Step 4: S2 match (DOI)
-    on_step(4, "S2 match (DOI)");
+    // Step 5: S2 match (DOI)
+    on_step(5, "S2 match (DOI)");
     conn.execute_batch(sql::join_s2_doi())
         .context("Failed: S2 DOI join")?;
 
@@ -108,8 +113,8 @@ pub fn run_with_progress(
         .query_row(sql::count_s2_doi(), [], |row| row.get::<_, i64>(0))
         .context("Failed to count S2 DOI matches")? as u64;
 
-    // Step 5: S2 match (PMID)
-    on_step(5, "S2 match (PMID)");
+    // Step 6: S2 match (PMID)
+    on_step(6, "S2 match (PMID)");
     conn.execute_batch(sql::join_s2_pmid())
         .context("Failed: S2 PMID fallback join")?;
 
@@ -124,18 +129,18 @@ pub fn run_with_progress(
         })
         .context("Failed to query join summary")?;
 
-    // Step 6: S2 enrich (wide integer key joins)
-    on_step(6, "S2 enrich");
+    // Step 7: S2 enrich (wide integer key joins)
+    on_step(7, "S2 enrich");
     conn.execute_batch(sql::enrich_s2())
         .context("Failed: S2 enrichment")?;
 
-    // Step 7: Export nodes
-    on_step(7, "Export nodes");
+    // Step 8: Export nodes
+    on_step(8, "Export nodes");
     conn.execute_batch(&sql::export_nodes(&config.output_dir))
         .context("Failed to export nodes.parquet")?;
 
-    // Step 8: Export filtered citations
-    on_step(8, "Export citations");
+    // Step 9: Export filtered citations
+    on_step(9, "Export citations");
     conn.execute_batch(&sql::export_citations(&config.output_dir))
         .context("Failed to export citations.parquet")?;
 
