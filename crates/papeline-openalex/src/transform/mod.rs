@@ -8,35 +8,7 @@ pub mod source;
 pub mod topic;
 pub mod work;
 
-use arrow::array::RecordBatch;
-use arrow::error::ArrowError;
-
-/// Batch size for creating `RecordBatch` from accumulated rows
-pub const RECORD_BATCH_SIZE: usize = 8192;
-
-/// Accumulator trait for batch processing
-pub trait Accumulator {
-    type Row;
-
-    /// Push a row into the accumulator
-    fn push(&mut self, row: Self::Row);
-
-    /// Number of rows currently buffered
-    fn len(&self) -> usize;
-
-    /// Check if buffer is full and should be flushed
-    fn is_full(&self) -> bool {
-        self.len() >= RECORD_BATCH_SIZE
-    }
-
-    /// Check if buffer is empty
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Take buffered rows as a RecordBatch, resetting internal state
-    fn take_batch(&mut self) -> Result<RecordBatch, ArrowError>;
-}
+pub use papeline_core::{Accumulator, DEFAULT_BATCH_SIZE as RECORD_BATCH_SIZE};
 
 // Re-exports
 pub use author::{AuthorAccumulator, AuthorRow};

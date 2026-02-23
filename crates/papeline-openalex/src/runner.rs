@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use papeline_core::SharedProgress;
+use papeline_core::{SharedProgress, WorkQueue};
 
 use crate::config::Config;
 use crate::manifest::{ManifestEntry, fetch_manifest};
@@ -62,8 +62,8 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<RunSumma
         })
         .collect();
 
-    // Process shards in parallel with atomic index for work distribution
-    let next_idx = AtomicUsize::new(0);
+    let queue = WorkQueue::new(shards);
+    let total_shards = queue.total();
     let stats: Mutex<Vec<ShardStats>> = Mutex::new(Vec::new());
     let failed: Mutex<usize> = Mutex::new(0);
 
@@ -73,14 +73,7 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<RunSumma
         for _ in 0..config.workers {
             s.spawn(|_| {
                 papeline_core::stream::stagger(stagger_slot.fetch_add(1, Ordering::Relaxed));
-                loop {
-                    // Atomically claim the next shard
-                    let idx = next_idx.fetch_add(1, Ordering::SeqCst);
-                    if idx >= shards.len() {
-                        break;
-                    }
-                    let shard = &shards[idx];
-
+                while let Some(shard) = queue.next() {
                     let pb = progress.shard_bar(&format!("shard_{:04}", shard.shard_idx));
                     pb.set_message("connecting...");
 
@@ -104,7 +97,7 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<RunSumma
     let failed_count = failed.into_inner().unwrap();
 
     let summary = RunSummary {
-        total_shards: shards.len(),
+        total_shards,
         completed_shards: stats.len(),
         failed_shards: failed_count,
         total_rows: stats.iter().map(|s| s.rows_written).sum(),

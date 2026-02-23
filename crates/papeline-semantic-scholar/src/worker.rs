@@ -9,18 +9,23 @@ use std::time::Instant;
 
 use arrow::array::RecordBatch;
 use indicatif::ProgressBar;
+use papeline_core::ShardError;
+use papeline_core::accumulator::process_lines;
 use papeline_core::filter;
 use papeline_core::progress::{SharedProgress, fmt_num, upgrade_to_bar};
+use papeline_core::retry::retry_with_backoff;
 use papeline_core::shutdown_flag;
 use papeline_core::sink::{ErrorFlag, LanceSink, ParquetSink};
-use papeline_core::stream::{self, GzipReader};
+use papeline_core::stream;
 
 use crate::config::Config;
 use crate::schema;
-use crate::state::{Dataset, ShardInfo, WorkQueue};
+use papeline_core::WorkQueue;
+
+use crate::state::{Dataset, ShardInfo};
 use crate::stats::{FilterShardStats, FilterSummary, PaperShardStats, PaperSummary};
 use crate::transform::{
-    AbstractRow, Accumulator, AuthorsAccumulator, CitationRow, CitationsAccumulator, EmbeddingRow,
+    AbstractRow, AuthorsAccumulator, CitationRow, CitationsAccumulator, EmbeddingRow,
     EmbeddingsAccumulator, FieldsAccumulator, PaperRow, PapersAccumulator, TextAccumulator,
     TldrRow,
 };
@@ -36,8 +41,6 @@ impl std::fmt::Debug for LanceWriterHandle {
         f.debug_struct("LanceWriterHandle").finish_non_exhaustive()
     }
 }
-
-use papeline_core::stream::http_config;
 
 /// Initial capacity for per-line JSON read buffer (typical S2 JSON line: 1–5KB)
 const LINE_BUF_CAPACITY: usize = 4096;
@@ -60,7 +63,20 @@ pub fn process_paper_shards(
         })
         .collect();
 
-    let queue = WorkQueue::new(shards, release_dir);
+    let queue = WorkQueue::filtered(shards, |s| {
+        let filename = format!("{}_{:04}.parquet", s.dataset, s.shard_idx);
+        let path = release_dir.join(&filename);
+        if papeline_core::sink::is_valid_parquet(&path) {
+            log::debug!(
+                "Shard {}_{:04} already completed, skipping",
+                s.dataset,
+                s.shard_idx
+            );
+            false
+        } else {
+            true
+        }
+    });
     if queue.total() == 0 {
         log::info!("All paper shards already completed");
         // Ensure corpus_ids.bin exists (may need recovery)
@@ -162,7 +178,28 @@ pub fn process_filtered_shards(
         })
         .collect();
 
-    let queue = WorkQueue::new(shard_infos, release_dir);
+    let queue = WorkQueue::filtered(shard_infos, |s| {
+        if s.dataset == Dataset::Embeddings {
+            let done = release_dir.join("embeddings.lance.done");
+            if done.exists() {
+                log::debug!("embeddings already completed (lance), skipping");
+                return false;
+            }
+            return true; // always reprocess (overwrite mode)
+        }
+        let filename = format!("{}_{:04}.parquet", s.dataset, s.shard_idx);
+        let path = release_dir.join(&filename);
+        if papeline_core::sink::is_valid_parquet(&path) {
+            log::debug!(
+                "Shard {}_{:04} already completed, skipping",
+                s.dataset,
+                s.shard_idx
+            );
+            false
+        } else {
+            true
+        }
+    });
     if queue.total() == 0 {
         log::info!("All phase 2 shards already completed");
         return (0, FilterSummary::default());
@@ -241,30 +278,163 @@ fn process_paper_shard(
     zstd_level: i32,
     pb: &ProgressBar,
 ) -> Result<(Vec<i64>, PaperShardStats), ()> {
-    let max_retries = http_config().max_retries;
-    let mut attempt = 0;
-    loop {
-        match attempt_paper_shard(shard, output_dir, domains, zstd_level, pb) {
-            Ok(result) => return Ok(result),
-            Err(e) if attempt < max_retries && e.is_retryable() => {
-                attempt += 1;
-                pb.set_message(format!("retry {attempt}/{max_retries}..."));
-                log::debug!(
-                    "papers_{:04}: attempt {}/{} failed: {e}, retrying...",
-                    shard.shard_idx,
-                    attempt,
-                    max_retries
-                );
-                std::thread::sleep(backoff_duration(attempt));
-            }
-            Err(e) => {
-                log::error!("papers_{:04}: failed permanently: {e}", shard.shard_idx);
-                if e.is_url_expired() {
-                    log::error!("URL expired. Delete .cache/urls and re-run to refresh.");
-                }
-                return Err(());
-            }
+    let label = format!("papers_{:04}", shard.shard_idx);
+    retry_with_backoff(&label, pb, || {
+        attempt_paper_shard(shard, output_dir, domains, zstd_level, pb)
+    })
+    .map_err(|e| {
+        if e.is_url_expired() {
+            log::error!("URL expired. Delete .cache/urls and re-run to refresh.");
         }
+    })
+}
+
+// === PaperPipeline: composite struct for Phase 1 multi-sink processing ===
+
+/// Manages 3 accumulators + 3 sinks for Phase 1 paper processing.
+/// Papers, authors, and fields are written to separate Parquet files from a single pass.
+struct PaperPipeline {
+    papers: (PapersAccumulator, ParquetSink),
+    authors: (AuthorsAccumulator, ParquetSink),
+    fields: (FieldsAccumulator, ParquetSink),
+}
+
+impl PaperPipeline {
+    fn new(shard_idx: usize, output_dir: &Path, zstd_level: i32) -> Result<Self, ShardError> {
+        Ok(Self {
+            papers: (
+                PapersAccumulator::new(),
+                ParquetSink::new(
+                    "papers",
+                    shard_idx,
+                    output_dir,
+                    schema::papers(),
+                    zstd_level,
+                )
+                .map_err(ShardError::Io)?,
+            ),
+            authors: (
+                AuthorsAccumulator::new(),
+                ParquetSink::new(
+                    "paper_authors",
+                    shard_idx,
+                    output_dir,
+                    schema::paper_authors(),
+                    zstd_level,
+                )
+                .map_err(ShardError::Io)?,
+            ),
+            fields: (
+                FieldsAccumulator::new(),
+                ParquetSink::new(
+                    "paper_fields",
+                    shard_idx,
+                    output_dir,
+                    schema::paper_fields(),
+                    zstd_level,
+                )
+                .map_err(ShardError::Io)?,
+            ),
+        })
+    }
+
+    /// Push a row into all 3 accumulators, flushing full batches.
+    /// Returns (authors_count, fields_count) for the row.
+    fn push(&mut self, row: PaperRow) -> Result<(usize, usize), ShardError> {
+        let authors_count = row.authors.len();
+        let fields_count = row.s2fieldsofstudy.len();
+
+        // authors/fields borrow, papers takes ownership (no String clones)
+        self.authors.0.push(&row);
+        self.fields.0.push(&row);
+        self.papers.0.push(row);
+
+        Self::flush_if_full(&mut self.papers.0, &mut self.papers.1)?;
+        Self::flush_if_full(&mut self.authors.0, &mut self.authors.1)?;
+        Self::flush_if_full(&mut self.fields.0, &mut self.fields.1)?;
+
+        Ok((authors_count, fields_count))
+    }
+
+    fn flush_if_full(
+        acc: &mut impl AccumulatorFlush,
+        sink: &mut ParquetSink,
+    ) -> Result<(), ShardError> {
+        if acc.should_flush() {
+            let batch = acc
+                .flush()
+                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+            sink.write_batch(&batch).map_err(ShardError::Io)?;
+        }
+        Ok(())
+    }
+
+    /// Flush remaining rows and finalize all 3 sinks.
+    fn finalize(mut self) -> Result<(), ShardError> {
+        Self::flush_remaining(&mut self.papers.0, &mut self.papers.1)?;
+        Self::flush_remaining(&mut self.authors.0, &mut self.authors.1)?;
+        Self::flush_remaining(&mut self.fields.0, &mut self.fields.1)?;
+        self.papers.1.finalize().map_err(ShardError::Io)?;
+        self.authors.1.finalize().map_err(ShardError::Io)?;
+        self.fields.1.finalize().map_err(ShardError::Io)?;
+        Ok(())
+    }
+
+    fn flush_remaining(
+        acc: &mut impl AccumulatorFlush,
+        sink: &mut ParquetSink,
+    ) -> Result<(), ShardError> {
+        if !acc.is_flush_empty() {
+            let batch = acc
+                .flush()
+                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
+            sink.write_batch(&batch).map_err(ShardError::Io)?;
+        }
+        Ok(())
+    }
+}
+
+/// Helper trait to unify flush operations across different accumulator types.
+/// Phase 1 accumulators don't implement core Accumulator trait (borrow vs owned push).
+trait AccumulatorFlush {
+    fn should_flush(&self) -> bool;
+    fn is_flush_empty(&self) -> bool;
+    fn flush(&mut self) -> Result<RecordBatch, arrow::error::ArrowError>;
+}
+
+impl AccumulatorFlush for PapersAccumulator {
+    fn should_flush(&self) -> bool {
+        self.is_full()
+    }
+    fn is_flush_empty(&self) -> bool {
+        self.is_empty()
+    }
+    fn flush(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
+        self.take_batch()
+    }
+}
+
+impl AccumulatorFlush for AuthorsAccumulator {
+    fn should_flush(&self) -> bool {
+        self.is_full()
+    }
+    fn is_flush_empty(&self) -> bool {
+        self.is_empty()
+    }
+    fn flush(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
+        self.take_batch()
+    }
+}
+
+impl AccumulatorFlush for FieldsAccumulator {
+    fn should_flush(&self) -> bool {
+        self.is_full()
+    }
+    fn is_flush_empty(&self) -> bool {
+        self.is_empty()
+    }
+    fn flush(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
+        self.take_batch()
     }
 }
 
@@ -279,49 +449,18 @@ fn attempt_paper_shard(
     let (mut reader, counter, total_bytes) =
         stream::open_gzip_reader(&shard.url).map_err(ShardError::Stream)?;
 
-    // Upgrade spinner to progress bar with total size
     if let Some(total) = total_bytes {
         upgrade_to_bar(pb, total);
     }
     pb.set_message("filtering...");
 
-    let mut papers_sink = ParquetSink::new(
-        "papers",
-        shard.shard_idx,
-        output_dir,
-        schema::papers(),
-        zstd_level,
-    )
-    .map_err(ShardError::Io)?;
-    let mut authors_sink = ParquetSink::new(
-        "paper_authors",
-        shard.shard_idx,
-        output_dir,
-        schema::paper_authors(),
-        zstd_level,
-    )
-    .map_err(ShardError::Io)?;
-    let mut fields_sink = ParquetSink::new(
-        "paper_fields",
-        shard.shard_idx,
-        output_dir,
-        schema::paper_fields(),
-        zstd_level,
-    )
-    .map_err(ShardError::Io)?;
-
-    let mut papers_acc = PapersAccumulator::new();
-    let mut authors_acc = AuthorsAccumulator::new();
-    let mut fields_acc = FieldsAccumulator::new();
+    let mut pipeline = PaperPipeline::new(shard.shard_idx, output_dir, zstd_level)?;
     let mut corpus_ids = Vec::new();
 
-    // Pre-compute quoted needles for cheap substring pre-filter.
-    // Avoids per-line `format!` in the hot path.
+    // Pre-compute quoted needles for cheap substring pre-filter
     let needles: Vec<String> = domains.iter().map(|d| format!("\"{d}\"")).collect();
 
     let mut buf = String::with_capacity(LINE_BUF_CAPACITY);
-
-    // Statistics counters
     let mut lines_scanned = 0usize;
     let mut pre_filtered = 0usize;
     let mut parse_errors = 0usize;
@@ -329,7 +468,6 @@ fn attempt_paper_shard(
     let mut authors_rows = 0usize;
     let mut fields_rows = 0usize;
 
-    // Progress update interval (every 10K lines to avoid overhead)
     const UPDATE_INTERVAL: usize = 10_000;
 
     loop {
@@ -339,7 +477,6 @@ fn attempt_paper_shard(
         }
         lines_scanned += 1;
 
-        // Update progress bar periodically
         if lines_scanned.is_multiple_of(UPDATE_INTERVAL) {
             pb.set_position(counter.load(std::sync::atomic::Ordering::Relaxed));
             let match_pct = if lines_scanned > 0 {
@@ -354,8 +491,7 @@ fn attempt_paper_shard(
             ));
         }
 
-        // Cheap substring pre-filter: skip rows without any target domain string.
-        // False positives (domain name appearing in other fields) are caught by matches_domains().
+        // Cheap substring pre-filter
         if !needles.iter().any(|n| buf.contains(n.as_str())) {
             pre_filtered += 1;
             continue;
@@ -382,60 +518,13 @@ fn attempt_paper_shard(
         }
 
         corpus_ids.push(row.corpusid);
-
-        // Track denormalized row counts
-        authors_rows += row.authors.len();
-        fields_rows += row.s2fieldsofstudy.len();
-
-        // authors/fields borrow, papers takes ownership (no String clones)
-        authors_acc.push(&row);
-        fields_acc.push(&row);
-        papers_acc.push(row);
-
-        if papers_acc.is_full() {
-            let batch = papers_acc
-                .take_batch()
-                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
-            papers_sink.write_batch(&batch).map_err(ShardError::Io)?;
-        }
-        if authors_acc.is_full() {
-            let batch = authors_acc
-                .take_batch()
-                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
-            authors_sink.write_batch(&batch).map_err(ShardError::Io)?;
-        }
-        if fields_acc.is_full() {
-            let batch = fields_acc
-                .take_batch()
-                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
-            fields_sink.write_batch(&batch).map_err(ShardError::Io)?;
-        }
+        let (ac, fc) = pipeline.push(row)?;
+        authors_rows += ac;
+        fields_rows += fc;
     }
 
-    // Flush remaining rows
     pb.set_message("writing...");
-    if !papers_acc.is_empty() {
-        let batch = papers_acc
-            .take_batch()
-            .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
-        papers_sink.write_batch(&batch).map_err(ShardError::Io)?;
-    }
-    if !authors_acc.is_empty() {
-        let batch = authors_acc
-            .take_batch()
-            .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
-        authors_sink.write_batch(&batch).map_err(ShardError::Io)?;
-    }
-    if !fields_acc.is_empty() {
-        let batch = fields_acc
-            .take_batch()
-            .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
-        fields_sink.write_batch(&batch).map_err(ShardError::Io)?;
-    }
-
-    papers_sink.finalize().map_err(ShardError::Io)?;
-    authors_sink.finalize().map_err(ShardError::Io)?;
-    fields_sink.finalize().map_err(ShardError::Io)?;
+    pipeline.finalize()?;
 
     let stats = PaperShardStats {
         shard_idx: shard.shard_idx,
@@ -461,36 +550,15 @@ fn process_filtered_shard(
     zstd_level: i32,
     pb: &ProgressBar,
 ) -> Result<FilterShardStats, ()> {
-    let max_retries = http_config().max_retries;
-    let mut attempt = 0;
-    loop {
-        match attempt_filtered_shard(shard, corpus_ids, output_dir, lance, zstd_level, pb) {
-            Ok(stats) => return Ok(stats),
-            Err(e) if attempt < max_retries && e.is_retryable() => {
-                attempt += 1;
-                pb.set_message(format!("retry {attempt}/{max_retries}..."));
-                log::debug!(
-                    "{}_{:04}: attempt {}/{} failed: {e}, retrying...",
-                    shard.dataset,
-                    shard.shard_idx,
-                    attempt,
-                    max_retries
-                );
-                std::thread::sleep(backoff_duration(attempt));
-            }
-            Err(e) => {
-                log::error!(
-                    "{}_{:04}: failed permanently: {e}",
-                    shard.dataset,
-                    shard.shard_idx
-                );
-                if e.is_url_expired() {
-                    log::error!("URL expired. Delete .cache/urls and re-run to refresh.");
-                }
-                return Err(());
-            }
+    let label = format!("{}_{:04}", shard.dataset, shard.shard_idx);
+    retry_with_backoff(&label, pb, || {
+        attempt_filtered_shard(shard, corpus_ids, output_dir, lance, zstd_level, pb)
+    })
+    .map_err(|e| {
+        if e.is_url_expired() {
+            log::error!("URL expired. Delete .cache/urls and re-run to refresh.");
         }
-    }
+    })
 }
 
 fn attempt_filtered_shard(
@@ -524,7 +592,7 @@ fn attempt_filtered_shard(
             )
             .map_err(ShardError::Io)?;
             let mut acc = TextAccumulator::new(schema::abstracts().clone());
-            let stats = process_shard_lines(
+            let stats = process_lines(
                 &mut reader,
                 &counter,
                 &mut acc,
@@ -552,7 +620,7 @@ fn attempt_filtered_shard(
             )
             .map_err(ShardError::Io)?;
             let mut acc = TextAccumulator::new(schema::tldrs().clone());
-            let stats = process_shard_lines(
+            let stats = process_lines(
                 &mut reader,
                 &counter,
                 &mut acc,
@@ -580,7 +648,7 @@ fn attempt_filtered_shard(
             )
             .map_err(ShardError::Io)?;
             let mut acc = CitationsAccumulator::new();
-            let stats = process_shard_lines(
+            let stats = process_lines(
                 &mut reader,
                 &counter,
                 &mut acc,
@@ -602,7 +670,7 @@ fn attempt_filtered_shard(
             let lance = lance.expect("embeddings requires lance channel");
             let mut sink = LanceSink::new(lance.sender.clone(), lance.error_flag.clone());
             let mut acc = EmbeddingsAccumulator::new();
-            let stats = process_shard_lines(
+            let stats = process_lines(
                 &mut reader,
                 &counter,
                 &mut acc,
@@ -630,185 +698,4 @@ fn attempt_filtered_shard(
         rows_written: line_stats.rows_written,
         elapsed: start.elapsed(),
     })
-}
-
-// === Generic shard line processor ===
-
-/// Statistics from processing shard lines
-struct LineProcessStats {
-    rows_written: usize,
-    lines_scanned: usize,
-}
-
-/// Read lines from a gzip reader, parse+filter each, push to accumulator, flush batches
-fn process_shard_lines<A: Accumulator>(
-    reader: &mut GzipReader,
-    counter: &stream::ByteCounter,
-    acc: &mut A,
-    mut write_batch: impl FnMut(&RecordBatch) -> std::io::Result<()>,
-    mut parse_filter: impl FnMut(&str) -> Option<A::Row>,
-    pb: &ProgressBar,
-) -> std::io::Result<LineProcessStats> {
-    let mut buf = String::with_capacity(LINE_BUF_CAPACITY);
-    let mut rows_written = 0usize;
-    let mut lines_scanned = 0usize;
-
-    // Progress update interval (every 10K lines to avoid overhead)
-    const UPDATE_INTERVAL: usize = 10_000;
-
-    loop {
-        buf.clear();
-        if reader.read_line(&mut buf)? == 0 {
-            break;
-        }
-        lines_scanned += 1;
-
-        // Update progress bar periodically
-        if lines_scanned.is_multiple_of(UPDATE_INTERVAL) {
-            pb.set_position(counter.load(std::sync::atomic::Ordering::Relaxed));
-            let match_pct = if lines_scanned > 0 {
-                rows_written as f64 / lines_scanned as f64 * 100.0
-            } else {
-                0.0
-            };
-            pb.set_message(format!(
-                "{} rows ({:.1}%)",
-                fmt_num(rows_written),
-                match_pct
-            ));
-        }
-
-        if let Some(row) = parse_filter(&buf) {
-            acc.push(row);
-            rows_written += 1;
-            if acc.is_full() {
-                write_batch(&acc.take_batch().map_err(std::io::Error::other)?)?;
-            }
-        }
-    }
-    if acc.len() > 0 {
-        write_batch(&acc.take_batch().map_err(std::io::Error::other)?)?;
-    }
-    Ok(LineProcessStats {
-        rows_written,
-        lines_scanned,
-    })
-}
-
-// === Error types ===
-
-#[derive(Debug)]
-enum ShardError {
-    Stream(stream::StreamError),
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for ShardError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Stream(e) => write!(f, "{e}"),
-            Self::Io(e) => write!(f, "IO: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for ShardError {}
-
-impl ShardError {
-    fn is_retryable(&self) -> bool {
-        match self {
-            Self::Stream(e) => e.is_retryable(),
-            Self::Io(e) => e.kind() != std::io::ErrorKind::StorageFull,
-        }
-    }
-
-    fn is_url_expired(&self) -> bool {
-        // 403/410 = URL signature expired
-        // 400 = AWS STS token expired (pre-signed URL with expired temporary credentials)
-        matches!(
-            self,
-            Self::Stream(stream::StreamError::Http {
-                status: Some(400 | 403 | 410),
-                ..
-            })
-        )
-    }
-}
-
-const fn backoff_duration(attempt: u32) -> std::time::Duration {
-    std::time::Duration::from_secs(2u64.pow(attempt))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use papeline_core::stream::StreamError;
-
-    fn http_err(status: u16) -> StreamError {
-        StreamError::Http {
-            status: Some(status),
-            message: "test".to_string(),
-        }
-    }
-
-    #[test]
-    fn backoff_exponential() {
-        assert_eq!(backoff_duration(1), std::time::Duration::from_secs(2));
-        assert_eq!(backoff_duration(2), std::time::Duration::from_secs(4));
-        assert_eq!(backoff_duration(3), std::time::Duration::from_secs(8));
-    }
-
-    #[test]
-    fn shard_error_stream_403_not_retryable() {
-        let err = ShardError::Stream(http_err(403));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn shard_error_stream_500_retryable() {
-        let err = ShardError::Stream(http_err(500));
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn shard_error_io_storage_full_not_retryable() {
-        let err = ShardError::Io(std::io::Error::new(std::io::ErrorKind::StorageFull, "full"));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn shard_error_io_other_retryable() {
-        let err = ShardError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe"));
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn is_url_expired_403() {
-        let err = ShardError::Stream(http_err(403));
-        assert!(err.is_url_expired());
-    }
-
-    #[test]
-    fn is_url_expired_410() {
-        let err = ShardError::Stream(http_err(410));
-        assert!(err.is_url_expired());
-    }
-
-    #[test]
-    fn is_url_expired_400() {
-        let err = ShardError::Stream(http_err(400));
-        assert!(err.is_url_expired());
-    }
-
-    #[test]
-    fn is_url_expired_false_for_500() {
-        let err = ShardError::Stream(http_err(500));
-        assert!(!err.is_url_expired());
-    }
-
-    #[test]
-    fn is_url_expired_false_for_io() {
-        let err = ShardError::Io(std::io::Error::other("test"));
-        assert!(!err.is_url_expired());
-    }
 }

@@ -1,25 +1,15 @@
 //! Shard processing — download and transform OpenAlex data
 
-use std::io::BufRead;
 use std::path::Path;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use indicatif::ProgressBar;
-use papeline_core::sink::ParquetSink;
-use papeline_core::stream;
+use papeline_core::ShardError;
+use papeline_core::shard_processor::{ShardConfig, process_gzip_shard};
 
 use crate::schema;
 use crate::state::ShardInfo;
-use crate::transform::{Accumulator, WorkAccumulator, WorkRow};
-
-use papeline_core::stream::http_config;
-
-/// Initial capacity for per-line JSON read buffer
-const LINE_BUF_CAPACITY: usize = 8192;
-
-/// Progress update interval (every N lines)
-const UPDATE_INTERVAL: usize = 10_000;
+use crate::transform::{WorkAccumulator, WorkRow};
 
 /// Statistics from processing a single shard
 #[derive(Debug)]
@@ -52,190 +42,33 @@ pub fn process_shard(
     zstd_level: i32,
     pb: &ProgressBar,
 ) -> Result<ShardStats, ShardError> {
-    let max_retries = http_config().max_retries;
-    let mut attempt = 0;
-    loop {
-        match attempt_shard(shard, output_dir, zstd_level, pb) {
-            Ok(stats) => return Ok(stats),
-            Err(e) if attempt < max_retries && e.is_retryable() => {
-                attempt += 1;
-                pb.set_message(format!("retry {attempt}/{max_retries}..."));
-                log::debug!(
-                    "shard_{:04}: attempt {}/{} failed: {e}, retrying...",
-                    shard.shard_idx,
-                    attempt,
-                    max_retries
-                );
-                std::thread::sleep(backoff_duration(attempt));
-            }
-            Err(e) => {
-                log::error!("shard_{:04}: failed permanently: {e}", shard.shard_idx);
-                return Err(e);
-            }
-        }
-    }
-}
-
-/// Single attempt to process a shard
-fn attempt_shard(
-    shard: &ShardInfo,
-    output_dir: &Path,
-    zstd_level: i32,
-    pb: &ProgressBar,
-) -> Result<ShardStats, ShardError> {
-    let start = Instant::now();
-
-    // Open gzip stream
-    let (mut reader, counter, total_bytes) =
-        stream::open_gzip_reader(&shard.url).map_err(ShardError::Stream)?;
-
-    // Upgrade pending bar to bytes bar if we know total size
-    if let Some(total) = total_bytes.or(shard.content_length) {
-        papeline_core::progress::upgrade_to_bar(pb, total);
-    }
-    pb.set_message("processing...");
-
-    // Create output sink
-    let mut sink = ParquetSink::new(
-        shard.entity.output_prefix(),
-        shard.shard_idx,
+    let label = format!("shard_{:04}", shard.shard_idx);
+    let cfg = ShardConfig {
+        url: &shard.url,
+        shard_label: &label,
+        output_prefix: shard.entity.output_prefix(),
+        shard_idx: shard.shard_idx,
         output_dir,
-        schema::works(),
+        schema: schema::works(),
         zstd_level,
-    )
-    .map_err(ShardError::Io)?;
-
-    let mut acc = WorkAccumulator::new();
-    let mut buf = String::with_capacity(LINE_BUF_CAPACITY);
-    let mut lines_scanned = 0usize;
-    let mut parse_errors = 0usize;
-
-    loop {
-        buf.clear();
-        if reader.read_line(&mut buf).map_err(ShardError::Io)? == 0 {
-            break;
-        }
-        lines_scanned += 1;
-
-        // Update progress periodically
-        if lines_scanned.is_multiple_of(UPDATE_INTERVAL) {
-            pb.set_position(counter.load(Ordering::Relaxed));
-            pb.set_message(format!(
-                "{} rows",
-                acc.len() + (lines_scanned - parse_errors)
-            ));
-        }
-
-        // Parse JSON line
-        let row: WorkRow = match serde_json::from_str(&buf) {
-            Ok(r) => r,
-            Err(e) => {
-                if parse_errors < 5 {
-                    log::debug!(
-                        "shard_{:04}: parse error at line {}: {e}",
-                        shard.shard_idx,
-                        lines_scanned
-                    );
-                }
-                parse_errors += 1;
-                continue;
-            }
-        };
-
-        acc.push(row);
-
-        // Flush when batch is full
-        if acc.is_full() {
-            let batch = acc
-                .take_batch()
-                .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
-            sink.write_batch(&batch).map_err(ShardError::Io)?;
-        }
-    }
-
-    // Flush remaining rows
-    pb.set_message("writing...");
-    if !acc.is_empty() {
-        let batch = acc
-            .take_batch()
-            .map_err(|e| ShardError::Io(std::io::Error::other(e)))?;
-        sink.write_batch(&batch).map_err(ShardError::Io)?;
-    }
-
-    let rows_written = sink.finalize().map_err(ShardError::Io)?;
+        content_length_hint: shard.content_length,
+    };
+    let stats = process_gzip_shard(&cfg, pb, WorkAccumulator::new, |line| {
+        serde_json::from_str::<WorkRow>(line).ok()
+    })?;
 
     Ok(ShardStats {
         shard_idx: shard.shard_idx,
-        lines_scanned,
-        parse_errors,
-        rows_written,
-        elapsed: start.elapsed(),
+        lines_scanned: stats.lines_scanned,
+        parse_errors: stats.lines_scanned.saturating_sub(stats.rows_written),
+        rows_written: stats.rows_written,
+        elapsed: stats.elapsed,
     })
-}
-
-/// Exponential backoff duration
-const fn backoff_duration(attempt: u32) -> Duration {
-    Duration::from_secs(2u64.pow(attempt))
-}
-
-// === Error type ===
-
-#[derive(Debug)]
-pub enum ShardError {
-    Stream(stream::StreamError),
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for ShardError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Stream(e) => write!(f, "{e}"),
-            Self::Io(e) => write!(f, "IO: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for ShardError {}
-
-impl ShardError {
-    pub fn is_retryable(&self) -> bool {
-        match self {
-            Self::Stream(e) => e.is_retryable(),
-            Self::Io(e) => e.kind() != std::io::ErrorKind::StorageFull,
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::ErrorKind;
-
-    #[test]
-    fn backoff_exponential() {
-        assert_eq!(backoff_duration(1), Duration::from_secs(2));
-        assert_eq!(backoff_duration(2), Duration::from_secs(4));
-        assert_eq!(backoff_duration(3), Duration::from_secs(8));
-    }
-
-    #[test]
-    fn shard_error_io_storage_full_not_retryable() {
-        let err = ShardError::Io(std::io::Error::new(ErrorKind::StorageFull, "disk full"));
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn shard_error_io_other_retryable() {
-        let err = ShardError::Io(std::io::Error::new(ErrorKind::BrokenPipe, "pipe"));
-        assert!(err.is_retryable());
-    }
-
-    #[test]
-    fn shard_error_display_io() {
-        let err = ShardError::Io(std::io::Error::new(ErrorKind::NotFound, "not found"));
-        let msg = format!("{err}");
-        assert!(msg.contains("IO:"));
-    }
 
     #[test]
     fn shard_stats_log_does_not_panic() {

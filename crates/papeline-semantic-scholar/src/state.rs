@@ -1,9 +1,4 @@
-//! Lock-free work queue for shard distribution
-
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-use papeline_core::sink;
+//! Pipeline state types for Semantic Scholar data processing
 
 /// Known dataset types in the S2 bulk download pipeline
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,66 +52,11 @@ impl std::fmt::Display for Dataset {
     }
 }
 
-/// Lock-free work queue distributing shards to workers
-pub struct WorkQueue {
-    shards: Vec<ShardInfo>,
-    cursor: AtomicUsize,
-}
-
 #[derive(Clone, Debug)]
 pub struct ShardInfo {
     pub dataset: Dataset,
     pub shard_idx: usize,
     pub url: String,
-}
-
-impl WorkQueue {
-    /// Create queue, skipping already-completed shards (resume support)
-    pub fn new(shards: Vec<ShardInfo>, output_dir: &Path) -> Self {
-        let filtered: Vec<ShardInfo> = shards
-            .into_iter()
-            .filter(|s| {
-                if s.dataset == Dataset::Embeddings {
-                    // Done marker = all embeddings completed in previous run
-                    let done = output_dir.join("embeddings.lance.done");
-                    if done.exists() {
-                        log::debug!("embeddings already completed (lance), skipping");
-                        return false;
-                    }
-                    return true; // always reprocess (overwrite mode)
-                }
-                let filename = format!("{}_{:04}.parquet", s.dataset, s.shard_idx);
-                let path = output_dir.join(&filename);
-                if sink::is_valid_parquet(&path) {
-                    log::debug!(
-                        "Shard {}_{:04} already completed, skipping",
-                        s.dataset,
-                        s.shard_idx
-                    );
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect();
-
-        log::debug!("{} shards in work queue", filtered.len());
-
-        Self {
-            shards: filtered,
-            cursor: AtomicUsize::new(0),
-        }
-    }
-
-    /// Get next shard to process (lock-free)
-    pub fn next(&self) -> Option<&ShardInfo> {
-        let i = self.cursor.fetch_add(1, Ordering::Relaxed);
-        self.shards.get(i)
-    }
-
-    pub const fn total(&self) -> usize {
-        self.shards.len()
-    }
 }
 
 #[cfg(test)]

@@ -67,8 +67,7 @@ where
 /// Nested list type for citation intents: List<List<Utf8>>
 type CitationIntentsData = Vec<Option<Vec<Option<Vec<Option<String>>>>>>;
 
-/// Batch size for creating `RecordBatch` from accumulated rows
-const RECORD_BATCH_SIZE: usize = 8192;
+use papeline_core::DEFAULT_BATCH_SIZE as RECORD_BATCH_SIZE;
 
 // === Typed row structs ===
 
@@ -240,18 +239,7 @@ pub struct EmbeddingRow {
     pub vector: EmbeddingVector,
 }
 
-// === Accumulator trait ===
-
-pub trait Accumulator {
-    type Row;
-    fn push(&mut self, row: Self::Row);
-    fn len(&self) -> usize;
-    fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-    fn is_full(&self) -> bool;
-    fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError>;
-}
+pub use papeline_core::Accumulator;
 
 // === Phase 1 accumulators (no trait — one row feeds 3 accumulators) ===
 
