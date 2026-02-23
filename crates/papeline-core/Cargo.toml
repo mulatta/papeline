@@ -23,3 +23,8 @@ glob.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+divan.workspace = true
+
+[[bench]]
+name = "parquet_write"
+harness = false

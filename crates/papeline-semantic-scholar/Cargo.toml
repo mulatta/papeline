@@ -23,3 +23,8 @@ signal-hook.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+divan.workspace = true
+
+[[bench]]
+name = "parse_s2"
+harness = false

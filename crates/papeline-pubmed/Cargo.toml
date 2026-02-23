@@ -19,3 +19,8 @@ indicatif.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+divan.workspace = true
+
+[[bench]]
+name = "parse_pubmed"
+harness = false

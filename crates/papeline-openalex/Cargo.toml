@@ -20,3 +20,8 @@ chrono.workspace = true
 indicatif.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
+divan.workspace = true
+
+[[bench]]
+name = "parse_oa"
+harness = false
