@@ -3,25 +3,26 @@
     { pkgs, ... }:
     {
       devShells.default = pkgs.mkShell {
-        packages = [
+        packages = with pkgs; [
           # Rust
-          pkgs.cargo
-          pkgs.rustc
-          pkgs.rust-analyzer
-          pkgs.clippy
+          cargo
+          rustc
+          rust-analyzer
+          clippy
           # Build deps (zlib-ng, openssl for native-tls)
-          pkgs.cmake
-          pkgs.pkg-config
-          pkgs.openssl
+          cmake
+          pkg-config
+          openssl
           # Tools
-          pkgs.hurl
-          pkgs.sops
-          pkgs.just
-          pkgs.protobuf
+          hurl
+          sops
+          just
+          protobuf
           # Profiling
-          pkgs.cargo-flamegraph
-          pkgs.perf
-          pkgs.samply
+          cargo-flamegraph
+          perf
+          samply
+          inferno
         ];
       };
     };
