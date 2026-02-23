@@ -34,6 +34,14 @@ const S2_COLS: &str = "\
 const CIT_COLS: &str =
     "citationid, citingcorpusid, citedcorpusid, isinfluential, contexts, intents";
 
+const S2_ABSTRACT_COLS: &str = "corpusid, abstract";
+
+const S2_TLDR_COLS: &str = "corpusid, text";
+
+const S2_PAPER_AUTHORS_COLS: &str = "corpusid, authorid, name, position";
+
+const S2_PAPER_FIELDS_COLS: &str = "corpusid, category, source";
+
 /// Write a parquet file from VALUES SQL using DuckDB.
 fn write_parquet(conn: &Connection, dir: &Path, filename: &str, cols: &str, values: &str) {
     std::fs::create_dir_all(dir).unwrap();
@@ -148,7 +156,7 @@ fn create_test_data(dir: &Path) {
              grants_json, publication_types, keywords,
              databanks_json, reference_count, coi_statement, copyright_info
            )
-         ) TO '{}/articles_0000.parquet' (FORMAT PARQUET)",
+         ) TO '{}/pubmed_0000.parquet' (FORMAT PARQUET)",
         pm_dir.display()
     ))
     .unwrap();
@@ -230,6 +238,47 @@ fn create_test_data(dir: &Path) {
         s2_dir.display()
     ))
     .unwrap();
+
+    // S2 abstracts
+    write_parquet(
+        &conn,
+        &s2_dir,
+        "abstracts_0000.parquet",
+        S2_ABSTRACT_COLS,
+        "(100, 'S2 abstract for paper A'), (200, 'S2 abstract for paper B'), \
+         (300, 'S2 abstract for paper D'), (400, 'S2 abstract unrelated')",
+    );
+
+    // S2 TLDRs
+    write_parquet(
+        &conn,
+        &s2_dir,
+        "tldrs_0000.parquet",
+        S2_TLDR_COLS,
+        "(100, 'TLDR for paper A'), (200, 'TLDR for paper B')",
+    );
+
+    // S2 paper_authors
+    write_parquet(
+        &conn,
+        &s2_dir,
+        "paper_authors_0000.parquet",
+        S2_PAPER_AUTHORS_COLS,
+        "(100, 1001, 'Alice', 0), (100, 1002, 'Bob', 1), \
+         (200, 1003, 'Charlie', 0), \
+         (300, 1004, 'Diana', 0), (300, 1005, 'Eve', 1)",
+    );
+
+    // S2 paper_fields
+    write_parquet(
+        &conn,
+        &s2_dir,
+        "paper_fields_0000.parquet",
+        S2_PAPER_FIELDS_COLS,
+        "(100, 'Computer Science', 's2ag'), (100, 'Biology', 's2ag'), \
+         (200, 'Mathematics', 's2ag'), \
+         (300, 'Medicine', 's2ag')",
+    );
 }
 
 #[test]
@@ -294,7 +343,7 @@ fn test_join_pipeline() {
         .unwrap();
     assert_eq!(citation_count, 2, "should have 2 filtered citations");
 
-    // Verify node schema has expected columns
+    // Verify node schema has expected columns (including new enriched ones)
     let node_cols: Vec<String> = {
         let mut stmt = conn
             .prepare(&format!(
@@ -307,20 +356,51 @@ fn test_join_pipeline() {
     };
 
     let expected = [
+        // PubMed base
         "pmid",
         "doi",
         "pmc_id",
-        "openalex_id",
-        "s2_corpusid",
         "title",
         "abstract_text",
-        "pub_year",
-        "pub_month",
-        "pub_day",
-        "journal_title",
-        "journal_issn",
+        // OA base
+        "openalex_id",
+        "oa_cited_by_count",
+        "oa_referenced_works_count",
+        "is_oa",
+        "oa_status",
+        "oa_work_type",
+        "primary_topic_id",
+        "primary_topic_display_name",
+        // OA expanded
+        "oa_abstract",
+        "oa_publication_date",
+        "oa_publication_year",
+        "oa_language",
+        "oa_display_name",
+        "oa_author_ids",
+        "oa_institution_ids",
+        "oa_source_id",
+        "oa_source_display_name",
+        "oa_source_type",
+        "oa_mag",
+        "oa_created_date",
+        "oa_updated_date",
+        // S2 match
+        "s2_corpusid",
+        // S2 enriched
         "s2_citation_count",
         "s2_influential_citation_count",
+        "s2_venue",
+        "s2_publication_types",
+        "s2_url",
+        "s2_year",
+        "s2_is_open_access",
+        "s2_publication_date",
+        "s2_reference_count",
+        "s2_abstract",
+        "s2_tldr",
+        "s2_authors",
+        "s2_fields",
     ];
     for col in expected {
         assert!(
@@ -328,6 +408,20 @@ fn test_join_pipeline() {
             "missing column: {col}, got: {node_cols:?}"
         );
     }
+
+    // Verify S2 abstract and TLDR enrichment for Paper A (corpusid=100)
+    let (s2_abstract, s2_tldr): (Option<String>, Option<String>) = conn
+        .query_row(
+            &format!(
+                "SELECT s2_abstract, s2_tldr FROM read_parquet('{}/nodes.parquet') WHERE pmid = 1",
+                output_dir.display()
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(s2_abstract.as_deref(), Some("S2 abstract for paper A"));
+    assert_eq!(s2_tldr.as_deref(), Some("TLDR for paper A"));
 }
 
 /// DOI normalization: prefix removal (https://doi.org/, HTTP://DOI.ORG/) and case folding.
@@ -352,7 +446,7 @@ fn test_doi_normalization() {
     write_parquet(
         &conn,
         &pm_dir,
-        "articles_0000.parquet",
+        "pubmed_0000.parquet",
         PM_COLS,
         &pm_row(10, "https://doi.org/10.5555/UPPER-Case", "Norm Paper"),
     );
@@ -449,7 +543,7 @@ fn test_duplicate_matching() {
     write_parquet(
         &conn,
         &pm_dir,
-        "articles_0000.parquet",
+        "pubmed_0000.parquet",
         PM_COLS,
         &pm_row(20, "10.9999/dup", "Dup Paper"),
     );
@@ -563,5 +657,165 @@ fn test_empty_directory() {
     assert!(
         err_msg.contains("No files found") || err_msg.contains("parquet"),
         "error should mention missing files, got: {err_msg}"
+    );
+}
+
+/// Missing optional S2 files: abstracts/tldrs/paper_authors/paper_fields.
+/// Join should succeed with those enrichment columns as NULL.
+#[test]
+fn test_missing_optional_s2_files() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let tmp = TempDir::new().unwrap();
+    let data = tmp.path().join("data");
+    let conn = Connection::open_in_memory().unwrap();
+
+    let pm_dir = data.join("pubmed");
+    let oa_dir = data.join("openalex");
+    let s2_dir = data.join("s2");
+
+    // Minimal data: 1 PM, 1 OA, 1 S2 papers + citations only (no abstracts/tldrs/authors/fields)
+    write_parquet(
+        &conn,
+        &pm_dir,
+        "pubmed_0000.parquet",
+        PM_COLS,
+        &pm_row(1, "10.1234/opt", "Optional Test"),
+    );
+    write_parquet(
+        &conn,
+        &oa_dir,
+        "works_0000.parquet",
+        OA_COLS,
+        &oa_row("W1", "10.1234/opt", "", 10),
+    );
+    write_parquet(
+        &conn,
+        &s2_dir,
+        "papers_0000.parquet",
+        S2_COLS,
+        &s2_row(500, "10.1234/opt", "", 25),
+    );
+    write_parquet(
+        &conn,
+        &s2_dir,
+        "citations_0000.parquet",
+        CIT_COLS,
+        &cit_row(9999, 500, 500),
+    );
+
+    let output = tmp.path().join("output");
+    let summary = papeline_join::run(&papeline_join::JoinConfig {
+        pubmed_dir: pm_dir,
+        openalex_dir: oa_dir,
+        s2_dir,
+        output_dir: output.clone(),
+        memory_limit: "256MB".to_string(),
+    })
+    .unwrap();
+
+    assert_eq!(summary.total_nodes, 1);
+    assert_eq!(summary.s2_matched, 1);
+
+    // Verify enrichment columns exist but are NULL
+    let verify = Connection::open_in_memory().unwrap();
+    let (s2_abstract, s2_tldr, has_authors_col, has_fields_col): (
+        Option<String>,
+        Option<String>,
+        bool,
+        bool,
+    ) = verify
+        .query_row(
+            &format!(
+                "SELECT s2_abstract, s2_tldr, \
+                 s2_authors IS NULL, s2_fields IS NULL \
+                 FROM read_parquet('{}/nodes.parquet')",
+                output.display()
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert!(s2_abstract.is_none(), "s2_abstract should be NULL");
+    assert!(s2_tldr.is_none(), "s2_tldr should be NULL");
+    assert!(has_authors_col, "s2_authors should be NULL");
+    assert!(has_fields_col, "s2_fields should be NULL");
+}
+
+/// S2 authors are correctly aggregated as LIST<STRUCT>.
+#[test]
+fn test_s2_authors_aggregation() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path().join("data");
+    create_test_data(&data_dir);
+
+    let output_dir = tmp.path().join("output");
+    let config = papeline_join::JoinConfig {
+        pubmed_dir: data_dir.join("pubmed"),
+        openalex_dir: data_dir.join("openalex"),
+        s2_dir: data_dir.join("s2"),
+        output_dir: output_dir.clone(),
+        memory_limit: "256MB".to_string(),
+    };
+
+    papeline_join::run(&config).unwrap();
+
+    let conn = Connection::open_in_memory().unwrap();
+
+    // Paper A (pmid=1, corpusid=100) should have 2 authors: Alice (pos 0), Bob (pos 1)
+    let author_count: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT LEN(s2_authors) FROM read_parquet('{}/nodes.parquet') WHERE pmid = 1",
+                output_dir.display()
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(author_count, 2, "Paper A should have 2 S2 authors");
+
+    // Verify ordering: first author should be Alice (position 0)
+    let first_author: String = conn
+        .query_row(
+            &format!(
+                "SELECT s2_authors[1].name FROM read_parquet('{}/nodes.parquet') WHERE pmid = 1",
+                output_dir.display()
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(first_author, "Alice");
+
+    // Paper A should have 2 fields: Biology, Computer Science (sorted)
+    let field_count: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT LEN(s2_fields) FROM read_parquet('{}/nodes.parquet') WHERE pmid = 1",
+                output_dir.display()
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(field_count, 2, "Paper A should have 2 S2 fields");
+
+    // Paper C (pmid=3) has no S2 match -> s2_authors should be NULL
+    let unmatched_authors: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT CAST(s2_authors AS VARCHAR) FROM read_parquet('{}/nodes.parquet') WHERE pmid = 3",
+                output_dir.display()
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        unmatched_authors.is_none(),
+        "unmatched paper should have NULL s2_authors"
     );
 }
