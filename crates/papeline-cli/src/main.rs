@@ -62,13 +62,13 @@ fn main() -> Result<()> {
     // Progress context (TTY auto-detect)
     let progress = Arc::new(papeline_core::ProgressContext::new());
 
-    // Logging: default quiet (warn), --debug enables debug
-    let multi = if progress.is_tty() {
-        Some(progress.multi())
-    } else {
-        None
-    };
-    papeline_core::init_logging(!cli.debug, cli.debug, multi);
+    // Logging:
+    //   TTY:     quiet (warn) unless --debug  — progress bars show activity
+    //   non-TTY: info unless --debug          — logs are the only progress indicator
+    let is_tty = progress.is_tty();
+    let multi = if is_tty { Some(progress.multi()) } else { None };
+    let quiet = if is_tty { !cli.debug } else { false };
+    papeline_core::init_logging(quiet, cli.debug, multi);
 
     // Load configuration
     let config = if let Some(path) = cli.config {

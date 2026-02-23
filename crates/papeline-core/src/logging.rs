@@ -3,14 +3,25 @@
 use indicatif::MultiProgress;
 
 /// ANSI color code and padded label for a log level.
-fn level_style(level: log::Level) -> (&'static str, &'static str) {
-    match level {
-        log::Level::Error => ("\x1b[31m", "ERROR"),
-        log::Level::Warn => ("\x1b[33m", "WARN "),
-        log::Level::Info => ("\x1b[32m", "INFO "),
-        log::Level::Debug => ("\x1b[36m", "DEBUG"),
-        log::Level::Trace => ("\x1b[35m", "TRACE"),
+fn level_style(level: log::Level, color: bool) -> (&'static str, &'static str, &'static str) {
+    let label = match level {
+        log::Level::Error => "ERROR",
+        log::Level::Warn => "WARN ",
+        log::Level::Info => "INFO ",
+        log::Level::Debug => "DEBUG",
+        log::Level::Trace => "TRACE",
+    };
+    if !color {
+        return ("", label, "");
     }
+    let ansi = match level {
+        log::Level::Error => "\x1b[31m",
+        log::Level::Warn => "\x1b[33m",
+        log::Level::Info => "\x1b[32m",
+        log::Level::Debug => "\x1b[36m",
+        log::Level::Trace => "\x1b[35m",
+    };
+    (ansi, label, "\x1b[0m")
 }
 
 /// Logger that prints through indicatif MultiProgress to avoid mixing with progress bars.
@@ -32,8 +43,9 @@ impl log::Log for IndicatifLogger {
 
     fn log(&self, record: &log::Record) {
         if self.inner.enabled(record.metadata()) {
-            let (color, label) = level_style(record.level());
-            let line = format!("[{color}{label}\x1b[0m] {}", record.args());
+            // TTY path — always has color (IndicatifLogger only used in TTY mode)
+            let (pre, label, post) = level_style(record.level(), true);
+            let line = format!("[{pre}{label}{post}] {}", record.args());
             self.multi.suspend(|| eprintln!("{line}"));
         }
     }
@@ -67,10 +79,11 @@ pub fn init_logging(quiet: bool, debug: bool, multi: Option<&MultiProgress>) {
             .expect("failed to init logger");
         log::set_max_level(max_level);
     } else {
+        // Non-TTY: no ANSI colors, timestamp for log aggregation
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_level))
             .format(|buf, record| {
-                let (color, label) = level_style(record.level());
-                writeln!(buf, "[{color}{label}\x1b[0m] {}", record.args())
+                let (_, label, _) = level_style(record.level(), false);
+                writeln!(buf, "[{label}] {}", record.args())
             })
             .init();
     }
