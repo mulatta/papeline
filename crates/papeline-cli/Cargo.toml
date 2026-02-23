@@ -12,6 +12,7 @@ papeline-core.workspace = true
 papeline-openalex.workspace = true
 papeline-pubmed.workspace = true
 papeline-semantic-scholar.workspace = true
+papeline-join.workspace = true
 
 clap.workspace = true
 tokio.workspace = true

@@ -32,6 +32,8 @@ struct Cli {
 enum Command {
     /// Fetch datasets from various sources
     Fetch(cmd::fetch::FetchArgs),
+    /// Join PubMed, OpenAlex, and S2 datasets
+    Join(cmd::join::JoinArgs),
     /// Show pipeline status
     Status(cmd::status::StatusArgs),
     /// Show current configuration
@@ -54,6 +56,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Fetch(args) => cmd::fetch::run(args, &config),
+        Command::Join(args) => cmd::join::run(args),
         Command::Status(args) => cmd::status::run(args),
         Command::Config => {
             println!("Configuration:");

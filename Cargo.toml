@@ -13,6 +13,7 @@ papeline-openalex = { path = "crates/papeline-openalex" }
 papeline-semantic-scholar = { path = "crates/papeline-semantic-scholar" }
 papeline-pubmed = { path = "crates/papeline-pubmed" }
 papeline-cli = { path = "crates/papeline-cli" }
+papeline-join = { path = "crates/papeline-join" }
 
 # Arrow ecosystem
 arrow = "54"
@@ -52,6 +53,7 @@ directories = "5"
 
 # Dev
 tempfile = "3"
+duckdb = { version = "1.2", features = ["bundled"] }
 
 [profile.release]
 lto = true
