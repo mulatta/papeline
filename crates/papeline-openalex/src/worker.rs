@@ -7,6 +7,7 @@ use indicatif::ProgressBar;
 use papeline_core::ShardError;
 use papeline_core::shard_processor::{ShardConfig, process_gzip_shard};
 
+use crate::config::TopicFilter;
 use crate::schema;
 use crate::state::ShardInfo;
 use crate::transform::{WorkAccumulator, WorkRow};
@@ -40,6 +41,7 @@ pub fn process_shard(
     shard: &ShardInfo,
     output_dir: &Path,
     zstd_level: i32,
+    topic_filter: &TopicFilter,
     pb: &ProgressBar,
 ) -> Result<ShardStats, ShardError> {
     let label = format!("shard_{:04}", shard.shard_idx);
@@ -53,8 +55,16 @@ pub fn process_shard(
         zstd_level,
         content_length_hint: shard.content_length,
     };
+    let filter = topic_filter;
     let stats = process_gzip_shard(&cfg, pb, WorkAccumulator::new, |line| {
-        sonic_rs::from_str::<WorkRow>(line).ok()
+        if !filter.is_empty() && !filter.pre_filter(line) {
+            return None;
+        }
+        let row = sonic_rs::from_str::<WorkRow>(line).ok()?;
+        if !filter.is_empty() && !filter.matches(&row) {
+            return None;
+        }
+        Some(row)
     })?;
 
     Ok(ShardStats {

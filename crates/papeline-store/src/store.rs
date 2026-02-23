@@ -534,6 +534,9 @@ mod tests {
             since: None,
             max_shards: None,
             zstd_level: 3,
+            domains: vec![],
+            fields: vec![],
+            topics: vec![],
         };
         make_stage_input(StageName::Openalex, &cfg)
     }

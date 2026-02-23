@@ -54,6 +54,12 @@ pub struct OpenAlexStageConfig {
     pub entity: Option<String>,
     pub since: Option<String>,
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub fields: Vec<String>,
+    #[serde(default)]
+    pub topics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -198,11 +204,20 @@ impl RunConfig {
     /// Build StageInput for OpenAlex.
     pub fn openalex_input(&self) -> Option<StageInput> {
         let cfg = self.openalex.as_ref()?;
+        let mut domains = cfg.domains.clone();
+        domains.sort();
+        let mut fields = cfg.fields.clone();
+        fields.sort();
+        let mut topics = cfg.topics.clone();
+        topics.sort();
         let input = OpenAlexInput {
             entity: cfg.entity.clone().unwrap_or_else(|| "works".into()),
             since: cfg.since.clone(),
             max_shards: cfg.limit,
             zstd_level: self.zstd_level,
+            domains,
+            fields,
+            topics,
         };
         Some(make_stage_input(StageName::Openalex, &input))
     }

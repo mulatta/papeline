@@ -118,11 +118,25 @@ pub struct Institution {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TopicHierarchyItem {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct Topic {
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub subfield: Option<TopicHierarchyItem>,
+    #[serde(default)]
+    pub field: Option<TopicHierarchyItem>,
+    #[serde(default)]
+    pub domain: Option<TopicHierarchyItem>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +231,32 @@ impl WorkRow {
         self.primary_topic
             .as_ref()
             .and_then(|t| t.display_name.clone())
+    }
+
+    /// Get primary topic domain display name
+    pub fn primary_topic_domain(&self) -> Option<&str> {
+        self.primary_topic
+            .as_ref()?
+            .domain
+            .as_ref()?
+            .display_name
+            .as_deref()
+    }
+
+    /// Get primary topic field display name
+    pub fn primary_topic_field(&self) -> Option<&str> {
+        self.primary_topic
+            .as_ref()?
+            .field
+            .as_ref()?
+            .display_name
+            .as_deref()
+    }
+
+    /// Get primary topic short ID (e.g., "T10978" from "https://openalex.org/T10978")
+    pub fn primary_topic_short_id(&self) -> Option<&str> {
+        let id = self.primary_topic.as_ref()?.id.as_deref()?;
+        Some(id.rsplit('/').next().unwrap_or(id))
     }
 
     /// Get source (venue) info
@@ -484,7 +524,13 @@ mod tests {
         "authorships": [
             {"author": {"id": "https://openalex.org/A123"}, "institutions": [{"id": "https://openalex.org/I456"}]}
         ],
-        "primary_topic": {"id": "https://openalex.org/T789", "display_name": "Machine Learning"},
+        "primary_topic": {
+            "id": "https://openalex.org/T789",
+            "display_name": "Machine Learning",
+            "subfield": {"id": "https://openalex.org/subfields/1234", "display_name": "Artificial Intelligence"},
+            "field": {"id": "https://openalex.org/fields/17", "display_name": "Computer Science"},
+            "domain": {"id": "https://openalex.org/domains/3", "display_name": "Physical Sciences"}
+        },
         "primary_location": {"source": {"id": "https://openalex.org/S111", "display_name": "Nature", "type": "journal"}},
         "ids": {"pmid": "12345678", "pmcid": "PMC1234567", "mag": "987654321"},
         "referenced_works": ["https://openalex.org/W1", "https://openalex.org/W2"],
@@ -541,6 +587,23 @@ mod tests {
             row.primary_topic_display_name(),
             Some("Machine Learning".to_string())
         );
+    }
+
+    #[test]
+    fn work_topic_hierarchy() {
+        let row: WorkRow = serde_json::from_str(SAMPLE_WORK).unwrap();
+        assert_eq!(row.primary_topic_domain(), Some("Physical Sciences"));
+        assert_eq!(row.primary_topic_field(), Some("Computer Science"));
+        assert_eq!(row.primary_topic_short_id(), Some("T789"));
+    }
+
+    #[test]
+    fn work_topic_hierarchy_missing() {
+        let json = r#"{"id": "https://openalex.org/W1", "primary_topic": {"id": "https://openalex.org/T1", "display_name": "X"}}"#;
+        let row: WorkRow = serde_json::from_str(json).unwrap();
+        assert!(row.primary_topic_domain().is_none());
+        assert!(row.primary_topic_field().is_none());
+        assert_eq!(row.primary_topic_short_id(), Some("T1"));
     }
 
     #[test]

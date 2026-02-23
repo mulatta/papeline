@@ -204,6 +204,7 @@ fn fetch_openalex(args: OpenAlexArgs, config: &Config, progress: &SharedProgress
         output_dir: output_dir.clone(),
         max_shards: args.limit,
         zstd_level,
+        topic_filter: Default::default(),
     };
 
     log::info!("Fetching OpenAlex {}", oa_config.entity);

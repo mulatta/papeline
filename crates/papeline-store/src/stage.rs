@@ -77,6 +77,9 @@ pub struct OpenAlexInput {
     pub since: Option<String>,
     pub max_shards: Option<usize>,
     pub zstd_level: i32,
+    pub domains: Vec<String>,
+    pub fields: Vec<String>,
+    pub topics: Vec<String>,
 }
 
 /// Content-affecting fields for S2 stage.
@@ -184,11 +187,39 @@ mod tests {
             since: Some("2024-01-01".into()),
             max_shards: Some(5),
             zstd_level: 3,
+            domains: vec![],
+            fields: vec![],
+            topics: vec![],
         };
         let si = make_stage_input(StageName::Openalex, &cfg);
         assert_eq!(si.stage, StageName::Openalex);
         assert!(si.config_json.contains(r#""entity":"works""#));
         assert!(si.config_json.contains(r#""since":"2024-01-01""#));
+    }
+
+    #[test]
+    fn openalex_filter_changes_hash() {
+        let cfg1 = OpenAlexInput {
+            entity: "works".into(),
+            since: None,
+            max_shards: None,
+            zstd_level: 3,
+            domains: vec![],
+            fields: vec![],
+            topics: vec![],
+        };
+        let cfg2 = OpenAlexInput {
+            entity: "works".into(),
+            since: None,
+            max_shards: None,
+            zstd_level: 3,
+            domains: vec!["Health Sciences".into()],
+            fields: vec![],
+            topics: vec![],
+        };
+        let si1 = make_stage_input(StageName::Openalex, &cfg1);
+        let si2 = make_stage_input(StageName::Openalex, &cfg2);
+        assert_ne!(si1.input_hash(), si2.input_hash());
     }
 
     #[test]

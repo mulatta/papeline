@@ -49,7 +49,7 @@ enum Command {
     /// Join PubMed, OpenAlex, and S2 datasets
     Join(cmd::join::JoinArgs),
     /// Run full pipeline from run.toml (fetch + join with caching)
-    Run(cmd::run::RunArgs),
+    Run(Box<cmd::run::RunArgs>),
     /// Manage content-addressable store (cache)
     Store(cmd::store::StoreArgs),
     /// Show current configuration
@@ -90,7 +90,7 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Fetch(args) => cmd::fetch::run(args, &config, &progress),
         Command::Join(args) => cmd::join::run(args, &progress),
-        Command::Run(args) => cmd::run::run(args, &config, &progress),
+        Command::Run(args) => cmd::run::run(*args, &config, &progress),
         Command::Store(args) => cmd::store::run(args),
         Command::Config => {
             use comfy_table::{

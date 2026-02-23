@@ -97,11 +97,26 @@ pub struct OpenAlexFlags {
     /// Maximum shards
     #[arg(long)]
     pub oa_limit: Option<usize>,
+    /// Topic domain filter (comma-separated, e.g. "Health Sciences,Life Sciences")
+    #[arg(long, value_delimiter = ',')]
+    pub oa_domains: Option<Vec<String>>,
+    /// Topic field filter (comma-separated, e.g. "Medicine,Biology")
+    #[arg(long, value_delimiter = ',')]
+    pub oa_fields: Option<Vec<String>>,
+    /// Topic ID filter (comma-separated, e.g. "T10978,T12345")
+    #[arg(long, value_delimiter = ',')]
+    pub oa_topics: Option<Vec<String>>,
 }
 
 impl OpenAlexFlags {
     fn is_active(&self) -> bool {
-        self.oa || self.oa_entity.is_some() || self.oa_since.is_some() || self.oa_limit.is_some()
+        self.oa
+            || self.oa_entity.is_some()
+            || self.oa_since.is_some()
+            || self.oa_limit.is_some()
+            || self.oa_domains.is_some()
+            || self.oa_fields.is_some()
+            || self.oa_topics.is_some()
     }
 }
 
@@ -247,6 +262,15 @@ fn apply_cli_overrides(config: &mut RunConfig, args: &RunArgs) {
         }
         if let Some(v) = args.oa.oa_limit {
             cfg.limit = Some(v);
+        }
+        if let Some(ref v) = args.oa.oa_domains {
+            cfg.domains = v.clone();
+        }
+        if let Some(ref v) = args.oa.oa_fields {
+            cfg.fields = v.clone();
+        }
+        if let Some(ref v) = args.oa.oa_topics {
+            cfg.topics = v.clone();
         }
     }
 
@@ -817,12 +841,18 @@ fn run_openalex(
         })
         .transpose()?;
 
+    let topic_filter = papeline_openalex::TopicFilter::new(
+        cfg.domains.clone(),
+        cfg.fields.clone(),
+        cfg.topics.clone(),
+    );
     let oa_config = papeline_openalex::Config {
         entity,
         since,
         output_dir: output_dir.to_path_buf(),
         max_shards: cfg.limit,
         zstd_level: run_config.zstd_level,
+        topic_filter,
     };
 
     let summary = papeline_openalex::run(&oa_config, progress.clone())?;

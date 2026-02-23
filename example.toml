@@ -2,14 +2,34 @@ output = "./data"
 zstd_level = 6
 
 [pubmed]
-limit = 2
+# no limit — full baseline (~1200 files)
 
 [openalex]
-limit = 2
+# no limit — full works snapshot
+domains = ["Health Sciences", "Life Sciences"]
+# Bio-relevant topics under Physical Sciences (not covered by domains above)
+topics = [
+  "T11162",
+  "T10211",
+  "T10059",
+  "T13280",
+  "T10729",
+  "T11190",
+  "T10862",
+  "T10782",
+  "T11966",
+  "T11829",
+  "T11626",
+]
 
 [s2]
 domains = ["Biology", "Medicine"]
-limit = 2
+# no limit — all shards for selected domains
 
 [join]
 memory_limit = "48GB"
+
+[http]
+max_retries = 10
+read_timeout = 90
+stagger_ms = 500

@@ -30,6 +30,6 @@ pub mod transform;
 pub mod worker;
 
 // Re-exports for convenience
-pub use config::Config;
+pub use config::{Config, TopicFilter};
 pub use runner::{RunSummary, run};
 pub use state::Entity;

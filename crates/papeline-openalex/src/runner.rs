@@ -68,7 +68,13 @@ pub fn run(config: &Config, progress: SharedProgress) -> anyhow::Result<RunSumma
         let pb = progress.shard_bar(&format!("shard_{:04}", shard.shard_idx));
         pb.set_message("connecting...");
 
-        match process_shard(shard, &config.output_dir, config.zstd_level, &pb) {
+        match process_shard(
+            shard,
+            &config.output_dir,
+            config.zstd_level,
+            &config.topic_filter,
+            &pb,
+        ) {
             Ok(s) => {
                 pb.finish_and_clear();
                 stats.lock().unwrap().push(s);
